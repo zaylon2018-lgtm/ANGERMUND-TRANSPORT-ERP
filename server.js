@@ -41,6 +41,27 @@ create table if not exists gps_points(id serial primary key,email text,driver te
 
 
 
+
+create table if not exists ai_trip_jobs(
+  id serial primary key,
+  driver text,
+  truck text,
+  status text default 'Queued',
+  source_docs jsonb default '[]'::jsonb,
+  generated_trip jsonb default '{}'::jsonb,
+  confidence numeric default 0,
+  created_at timestamptz default now()
+);
+create table if not exists driver_scores(
+  id serial primary key,
+  driver text,
+  score numeric default 100,
+  fuel_efficiency numeric default 0,
+  incidents numeric default 0,
+  late_deliveries numeric default 0,
+  created_at timestamptz default now()
+);
+
 create table if not exists upload_queue(
   id serial primary key,
   driver text,
@@ -541,6 +562,86 @@ app.post('/api/ai/auto-sort',auth,async(req,res)=>{
     }
   }
   res.json({created:made});
+});
+
+
+app.post('/api/ai/trip-generator',auth,async(req,res)=>{
+  const uploads=(await pool.query("select * from upload_queue where status='Scanned' order by created_at desc limit 25")).rows;
+  const docs=(await pool.query("select * from ai_documents order by created_at desc limit 25")).rows;
+
+  let grouped={};
+  for(const d of docs){
+    const truck=d.truck||'Unknown';
+    if(!grouped[truck]) grouped[truck]=[];
+    grouped[truck].push(d);
+  }
+
+  let created=[];
+  for(const truck of Object.keys(grouped)){
+    const arr=grouped[truck];
+    const diesel=arr.filter(x=>['diesel','invoice'].includes(x.doc_type));
+    const pod=arr.find(x=>x.doc_type==='pod');
+    const permit=arr.find(x=>x.doc_type==='permit');
+
+    const amount=diesel.reduce((a,b)=>a+Number(b.amount||0),0);
+    const supplier=diesel[0]?.supplier||'Unknown';
+    const route=pod?.description || 'AI Generated Route';
+    const driver=arr[0]?.supplier || 'Unknown Driver';
+
+    const trip={
+      truck,
+      driver,
+      route,
+      diesel_cost:amount,
+      permits_cost:Number(permit?.amount||0),
+      client:pod?.supplier||'Unknown Client',
+      status:'AI Generated'
+    };
+
+    const r=await pool.query(
+      "insert into trips(route,truck,driver,diesel_cost,permits_cost,client,status) values($1,$2,$3,$4,$5,$6,$7) returning *",
+      [trip.route,trip.truck,trip.driver,trip.diesel_cost,trip.permits_cost,trip.client,trip.status]
+    );
+
+    await pool.query(
+      "insert into ai_trip_jobs(driver,truck,status,source_docs,generated_trip,confidence) values($1,$2,'Generated',$3,$4,$5)",
+      [trip.driver,trip.truck,JSON.stringify(arr.map(x=>x.id)),trip,0.78]
+    );
+
+    created.push(r.rows[0]);
+  }
+
+  res.json({created});
+});
+
+app.post('/api/ai/driver-score',auth,async(req,res)=>{
+  await pool.query("delete from driver_scores");
+  const drivers=(await pool.query("select distinct driver from trips where driver is not null and driver<>''")).rows;
+
+  for(const d of drivers){
+    const trips=(await pool.query("select * from trips where driver=$1",[d.driver])).rows;
+    const diesel=trips.reduce((a,b)=>a+Number(b.diesel_cost||0),0);
+    const km=trips.reduce((a,b)=>a+Number(b.km||0),0);
+    const ratio=km>0?diesel/km:0;
+    let score=100;
+    if(ratio>18) score-=20;
+    if(ratio>25) score-=30;
+    await pool.query(
+      "insert into driver_scores(driver,score,fuel_efficiency) values($1,$2,$3)",
+      [d.driver,score,ratio]
+    );
+  }
+  res.json({ok:true});
+});
+
+app.get('/api/ai/dispatch-suggestion',auth,async(req,res)=>{
+  const trucks=(await pool.query("select * from trucks order by current_km asc limit 5")).rows;
+  const drivers=(await pool.query("select * from driver_scores order by score desc limit 5")).rows;
+  res.json({
+    recommended_trucks:trucks,
+    recommended_drivers:drivers,
+    message:'AI recommends trucks with lower km and drivers with higher fuel scores.'
+  });
 });
 
 app.get('/api/export/:table/:format',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).send('Unknown');let rows=(await pool.query(`select * from ${t} order by created_at desc`)).rows;let f=req.params.format;if(f==='json')return res.json(rows);if(f==='xlsx'){let wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),req.params.table);res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.xlsx`);return res.send(XLSX.write(wb,{type:'buffer',bookType:'xlsx'}))}if(f==='csv'){res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.csv`);let h=Object.keys(rows[0]||{});return res.send([h.join(','),...rows.map(r=>h.map(k=>JSON.stringify(r[k]??'')).join(','))].join('\\n'))}let doc=new PDFDocument({margin:30});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.pdf`);doc.pipe(res);doc.fontSize(18).text('Angermund Transport - '+req.params.table.toUpperCase());rows.slice(0,200).forEach((r,i)=>doc.fontSize(8).text((i+1)+'. '+JSON.stringify(r)));doc.end()});

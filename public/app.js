@@ -469,3 +469,41 @@ doLogin = async function(){
 };
 
 setTimeout(()=>{ if(isStrictDriver()) lockDriverUI(); },1000);
+
+
+// V11 AI Trip Engine + Smart Features
+async function generateTripsAI(){
+  const r = await api('/ai/trip-generator',{method:'POST',body:{}});
+  alert('AI generated '+(r.created?.length||0)+' trips');
+  await loadAll();
+}
+async function generateDriverScores(){
+  await api('/ai/driver-score',{method:'POST',body:{}});
+  alert('Driver AI scores updated');
+  await loadAll();
+}
+async function loadDispatchSuggestion(){
+  const r = await api('/ai/dispatch-suggestion');
+  alert(r.message || 'Suggestions loaded');
+  console.log(r);
+}
+
+const prevRenderSmartAI = renderSmartAI;
+renderSmartAI = function(){
+  prevRenderSmartAI();
+  const sec=document.getElementById('smartai');
+  if(!sec) return;
+  const extra=document.createElement('div');
+  extra.className='card';
+  extra.innerHTML=`
+    <h2>AI Auto Trip Engine</h2>
+    <button class="btn green" onclick="generateTripsAI()">Generate Trips From Uploaded Docs</button>
+    <button class="btn" onclick="generateDriverScores()">Generate Driver Scores</button>
+    <button class="btn orange" onclick="loadDispatchSuggestion()">AI Dispatch Suggestion</button>
+    <p class="help">
+      AI now links uploaded diesel slips, PODs, permits and invoices together to auto-create trips.
+      Driver scoring and dispatch suggestions are also included.
+    </p>
+  `;
+  sec.appendChild(extra);
+};
