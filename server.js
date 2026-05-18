@@ -19,7 +19,7 @@ app.use(express.static(path.join(__dirname,'public')));
 const pool=new pg.Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_URL?{rejectUnauthorized:false}:false});
 const upload=multer({dest:path.join(__dirname,'uploads'),limits:{fileSize:8*1024*1024}});
 
-const tableMap={trips:'trips',trucks:'trucks',drivers:'drivers',diesel:'diesel',permits:'permits',payroll:'payroll',workers:'workers',maintenance:'maintenance',tyres:'tyres',workshop:'workshop_jobs',fines:'fines_damages',border:'border_logs',gps:'gps_points',invoices:'invoices',users:'users',reminders:'reminders',masters:'masters'};
+const tableMap={trips:'trips',trucks:'trucks',drivers:'drivers',diesel:'diesel',permits:'permits',payroll:'payroll',workers:'workers',maintenance:'maintenance',tyres:'tyres',workshop:'workshop_jobs',fines:'fines_damages',border:'border_logs',gps:'gps_points',invoices:'invoices',users:'users',reminders:'reminders',masters:'masters',accounts:'accounts',transactions:'account_transactions',vendors:'vendors',customers:'customers',payments:'payments',ai_documents:'ai_documents',ai_alerts:'ai_alerts'};
 
 const schema=`
 create table if not exists users(id serial primary key,email text unique not null,password_hash text not null,name text,role text default 'admin',created_at timestamptz default now());
@@ -38,6 +38,41 @@ create table if not exists workshop_jobs(id serial primary key,date date default
 create table if not exists fines_damages(id serial primary key,date date default current_date,driver text,truck text,type text,description text,amount numeric default 0,responsible_party text,status text default 'Open',created_at timestamptz default now());
 create table if not exists border_logs(id serial primary key,date date default current_date,truck text,driver text,border_post text,direction text,arrival_time text,release_time text,fees numeric default 0,delay_reason text,created_at timestamptz default now());
 create table if not exists gps_points(id serial primary key,email text,driver text,truck text,lat numeric,lng numeric,accuracy numeric,created_at timestamptz default now());
+
+
+create table if not exists ai_documents(
+  id serial primary key,
+  doc_type text,
+  file_url text,
+  supplier text,
+  invoice_no text,
+  date date,
+  truck text,
+  amount numeric default 0,
+  vat numeric default 0,
+  description text,
+  confidence numeric default 0,
+  manual_fields text,
+  scan_json jsonb default '{}'::jsonb,
+  status text default 'Scanned',
+  created_at timestamptz default now()
+);
+create table if not exists ai_alerts(
+  id serial primary key,
+  alert_type text,
+  severity text default 'Normal',
+  title text,
+  message text,
+  status text default 'Open',
+  created_at timestamptz default now()
+);
+
+create table if not exists accounts(id serial primary key,code text,name text,type text default 'Expense',balance numeric default 0,created_at timestamptz default now());
+create table if not exists vendors(id serial primary key,name text,phone text,email text,vat_no text,created_at timestamptz default now());
+create table if not exists customers(id serial primary key,name text,phone text,email text,vat_no text,created_at timestamptz default now());
+create table if not exists account_transactions(id serial primary key,date date default current_date,type text,account text,description text,reference text,debit numeric default 0,credit numeric default 0,source_module text,source_id integer,created_at timestamptz default now());
+create table if not exists payments(id serial primary key,date date default current_date,party text,method text,reference text,amount numeric default 0,status text default 'Paid',notes text,created_at timestamptz default now());
+
 create table if not exists invoices(id serial primary key,date date default current_date,client text,invoice_no text,route text,amount numeric default 0,paid numeric default 0,status text default 'Unpaid',created_at timestamptz default now());
 `;
 
@@ -181,6 +216,152 @@ app.post('/api/slips/scan',auth,upload.single('slip'),async(req,res)=>{
       message:'Driver must enter manually.'
     });
   }
+});
+
+
+app.get('/api/accounting/summary',auth,async(req,res)=>{
+  const income=(await pool.query("select coalesce(sum(credit),0) v from account_transactions where type='Income'")).rows[0].v;
+  const expense=(await pool.query("select coalesce(sum(debit),0) v from account_transactions where type='Expense'")).rows[0].v;
+  const receivable=(await pool.query("select coalesce(sum(amount-paid),0) v from invoices")).rows[0].v;
+  const unpaid=(await pool.query("select * from invoices where coalesce(amount,0)>coalesce(paid,0) order by date desc limit 20")).rows;
+  const recent=(await pool.query("select * from account_transactions order by created_at desc limit 30")).rows;
+  res.json({income:Number(income||0),expense:Number(expense||0),profit:Number(income||0)-Number(expense||0),receivable:Number(receivable||0),unpaid,recent});
+});
+app.post('/api/accounting/sync',auth,async(req,res)=>{
+  await pool.query("delete from account_transactions where source_module in ('trips','diesel','maintenance','payroll','invoices')");
+  const trips=(await pool.query("select * from trips")).rows;
+  for(const t of trips){
+    const income=Number(t.km||0)*Number(t.rate_km||0);
+    const cost=Number(t.diesel_cost||0)+Number(t.tolls||0)+Number(t.permits_cost||0)+Number(t.food_money||0)+Number(t.border_cost||0)+Number(t.repairs||0)+Number(t.other_cost||0);
+    if(income) await pool.query("insert into account_transactions(type,account,description,reference,credit,source_module,source_id) values('Income','Transport Income',$1,$2,$3,'trips',$4)",[t.route||'Trip income',t.trip_no||String(t.id),income,t.id]);
+    if(cost) await pool.query("insert into account_transactions(type,account,description,reference,debit,source_module,source_id) values('Expense','Trip Expenses',$1,$2,$3,'trips',$4)",[t.route||'Trip expenses',t.trip_no||String(t.id),cost,t.id]);
+  }
+  const diesel=(await pool.query("select * from diesel")).rows;
+  for(const d of diesel){ if(Number(d.amount||0)) await pool.query("insert into account_transactions(type,account,description,reference,debit,source_module,source_id) values('Expense','Diesel Expense',$1,$2,$3,'diesel',$4)",[d.supplier||'Diesel',d.slip_no||String(d.id),d.amount,d.id]); }
+  const maint=(await pool.query("select * from maintenance")).rows;
+  for(const m of maint){ if(Number(m.cost||0)) await pool.query("insert into account_transactions(type,account,description,reference,debit,source_module,source_id) values('Expense','Repairs & Maintenance',$1,$2,$3,'maintenance',$4)",[m.issue||'Maintenance',m.truck||String(m.id),m.cost,m.id]); }
+  const pay=(await pool.query("select * from payroll")).rows;
+  for(const p of pay){ const amt=Number(p.basic_salary||0)+Number(p.overtime_hours||0)*50-Number(p.deductions||0)+Number(p.advance||0); if(amt) await pool.query("insert into account_transactions(type,account,description,reference,debit,source_module,source_id) values('Expense','Payroll Expense',$1,$2,$3,'payroll',$4)",[p.employee||'Payroll',p.date||String(p.id),amt,p.id]); }
+  const inv=(await pool.query("select * from invoices")).rows;
+  for(const i of inv){ if(Number(i.amount||0)) await pool.query("insert into account_transactions(type,account,description,reference,credit,source_module,source_id) values('Income','Accounts Receivable',$1,$2,$3,'invoices',$4)",[i.client||'Invoice',i.invoice_no||String(i.id),i.amount,i.id]); }
+  res.json({ok:true});
+});
+
+
+async function scanDocumentAI(file, docType){
+  if(!process.env.OPENAI_API_KEY){
+    return {manual_required:true,confidence:0,api_error:"OPENAI_API_KEY is not set",reason:"AI key missing."};
+  }
+  const b64=fs.readFileSync(file).toString('base64');
+  const prompt=`You are an AI document scanner for a Namibian transport ERP.
+Document type: ${docType}.
+Extract readable fields. Return ONLY JSON:
+{
+ "doc_type": "${docType}",
+ "supplier": string|null,
+ "invoice_no": string|null,
+ "date": "YYYY-MM-DD"|null,
+ "truck": string|null,
+ "amount": number|null,
+ "vat": number|null,
+ "description": string|null,
+ "confidence": number,
+ "manual_fields": string[],
+ "manual_required": boolean,
+ "reason": string
+}
+Rules:
+- Never guess unreadable amounts or invoice numbers.
+- If amount is readable, fill it even if other fields are missing.
+- Only put unclear fields in manual_fields.
+- For permit/license docs, put expiry date in date and permit number in invoice_no.
+- For tyre invoices, include tyre serial/brand/size in description.
+- For workshop/damage photos, describe visible damage and set amount null if no amount is visible.`;
+  try{
+    const resp=await fetch('https://api.openai.com/v1/chat/completions',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+process.env.OPENAI_API_KEY},
+      body:JSON.stringify({
+        model:process.env.AI_MODEL||'gpt-4o-mini',
+        temperature:0,
+        response_format:{type:"json_object"},
+        messages:[{role:'user',content:[
+          {type:'text',text:prompt},
+          {type:'image_url',image_url:{url:`data:image/jpeg;base64,${b64}`}}
+        ]}]
+      })
+    });
+    const data=await resp.json().catch(()=>({}));
+    if(!resp.ok || data.error){
+      return {manual_required:true,confidence:0,api_error:data.error?.message||JSON.stringify(data),reason:"OpenAI error."};
+    }
+    const txt=data.choices?.[0]?.message?.content||'{}';
+    const parsed=JSON.parse(txt);
+    parsed.confidence=Number(parsed.confidence||0);
+    parsed.manual_fields=Array.isArray(parsed.manual_fields)?parsed.manual_fields:[];
+    return parsed;
+  }catch(e){
+    return {manual_required:true,confidence:0,api_error:e.message,reason:"AI scanner failed."};
+  }
+}
+
+app.post('/api/ai/scan/:docType',auth,upload.single('file'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'No file uploaded'});
+  const docType=req.params.docType;
+  const scan=await scanDocumentAI(req.file.path, docType);
+  const fileUrl='/uploads/'+req.file.filename;
+  const ok=Number(scan.confidence||0)>=0.45 && (scan.amount!=null || scan.invoice_no || scan.description);
+  const r=await pool.query(
+    "insert into ai_documents(doc_type,file_url,supplier,invoice_no,date,truck,amount,vat,description,confidence,manual_fields,scan_json,status) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning *",
+    [docType,fileUrl,scan.supplier||'',scan.invoice_no||'',scan.date||null,scan.truck||'',scan.amount||0,scan.vat||0,scan.description||'',scan.confidence||0,(scan.manual_fields||[]).join(', '),scan,ok?'Scanned':'Manual Required']
+  );
+  res.json({scan_status:ok?'partial_auto':'manual_required',scan:{...scan,file_url:fileUrl},row:r.rows[0]});
+});
+
+app.post('/api/ai/fraud-check',auth,async(req,res)=>{
+  await pool.query("delete from ai_alerts where alert_type='fraud'");
+  const diesel=(await pool.query("select * from diesel order by date desc, created_at desc")).rows;
+  const alerts=[];
+  const seen=new Set();
+  for(const d of diesel){
+    const key=[d.slip_no,d.amount,d.litres,d.truck].join('|');
+    if(d.slip_no && seen.has(key)){
+      alerts.push(['fraud','High','Duplicate diesel slip','Possible duplicate slip '+d.slip_no+' for '+(d.truck||'unknown truck')]);
+    }
+    seen.add(key);
+    if(Number(d.litres||0)>800) alerts.push(['fraud','High','Large diesel litres','Slip has '+d.litres+' litres for '+(d.truck||'unknown truck')]);
+    if(Number(d.amount||0)>25000) alerts.push(['fraud','Normal','Large diesel amount','Slip amount '+d.amount+' for '+(d.truck||'unknown truck')]);
+  }
+  for(const a of alerts){
+    await pool.query("insert into ai_alerts(alert_type,severity,title,message) values($1,$2,$3,$4)",a);
+  }
+  res.json({alerts:alerts.length});
+});
+
+app.post('/api/ai/assistant',auth,async(req,res)=>{
+  const question=(req.body?.question||'').slice(0,1000);
+  const trips=(await pool.query("select route,driver,truck,km,rate_km,diesel_cost,tolls,permits_cost,food_money,border_cost,repairs,other_cost,status,date from trips order by created_at desc limit 50")).rows;
+  const diesel=(await pool.query("select truck,driver,litres,amount,km,supplier,date from diesel order by created_at desc limit 50")).rows;
+  const invoices=(await pool.query("select client,invoice_no,amount,paid,status,date from invoices order by created_at desc limit 30")).rows;
+  if(!process.env.OPENAI_API_KEY){
+    return res.json({answer:"AI key not configured. Add OPENAI_API_KEY in Railway variables."});
+  }
+  try{
+    const resp=await fetch('https://api.openai.com/v1/chat/completions',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+process.env.OPENAI_API_KEY},
+      body:JSON.stringify({
+        model:process.env.AI_MODEL||'gpt-4o-mini',
+        temperature:0.2,
+        messages:[
+          {role:'system',content:'You are an assistant for Angermund Transport ERP. Give practical, short business advice from the provided ERP data. Use Namibian dollars.'},
+          {role:'user',content:JSON.stringify({question,trips,diesel,invoices})}
+        ]
+      })
+    });
+    const data=await resp.json();
+    res.json({answer:data.choices?.[0]?.message?.content||data.error?.message||'No answer'});
+  }catch(e){res.json({answer:e.message})}
 });
 
 app.get('/api/export/:table/:format',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).send('Unknown');let rows=(await pool.query(`select * from ${t} order by created_at desc`)).rows;let f=req.params.format;if(f==='json')return res.json(rows);if(f==='xlsx'){let wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),req.params.table);res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.xlsx`);return res.send(XLSX.write(wb,{type:'buffer',bookType:'xlsx'}))}if(f==='csv'){res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.csv`);let h=Object.keys(rows[0]||{});return res.send([h.join(','),...rows.map(r=>h.map(k=>JSON.stringify(r[k]??'')).join(','))].join('\\n'))}let doc=new PDFDocument({margin:30});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.pdf`);doc.pipe(res);doc.fontSize(18).text('Angermund Transport - '+req.params.table.toUpperCase());rows.slice(0,200).forEach((r,i)=>doc.fontSize(8).text((i+1)+'. '+JSON.stringify(r)));doc.end()});

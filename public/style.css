@@ -22,3 +22,20 @@
   .bottomNav b{display:block;font-size:18px}
   .mobileTop{display:flex!important;justify-content:space-between}
 }
+
+/* V5 Accounting + phone logout/menu fix */
+.accountGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+@media(max-width:1000px){
+  .userbox{position:static!important;margin-bottom:90px!important;padding-bottom:100px!important}
+  .side{padding-bottom:130px!important;overflow-y:auto!important}
+  .bottomNav{height:68px!important}
+  .quickFab{bottom:88px!important}
+  .mobileTop button:last-child{display:none!important}
+  .accountGrid{grid-template-columns:1fr!important}
+}
+
+/* V6 smart AI / GPS */
+.aiBox{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.statusDot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#38d66b;margin-right:6px}
+.gpsControls{display:flex;gap:8px;flex-wrap:wrap}
+@media(max-width:1000px){.aiBox{grid-template-columns:1fr}.gpsControls .btn{width:100%;}.side{z-index:60}.bottomNav{z-index:70}.quickFab{z-index:80}}

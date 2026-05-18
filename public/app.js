@@ -24,7 +24,7 @@ const tables={
  invoices:{title:'Invoices',fields:['date','client','invoice_no','route','amount','paid','status']},
  reminders:{title:'Reminders',fields:['title','module','related_name','due_date','priority','status','notes']},
  masters:{title:'Dropdown Lists',fields:['type','value']},
- users:{title:'Users',fields:['email','password','name','role']}
+ accounts:{title:'Accounts',fields:['code','name','type','balance']},transactions:{title:'Transactions',fields:['date','type','account','description','reference','debit','credit']},vendors:{title:'Vendors',fields:['name','phone','email','vat_no']},customers:{title:'Customers',fields:['name','phone','email','vat_no']},payments:{title:'Payments',fields:['date','party','method','reference','amount','status','notes']},ai_documents:{title:'AI Documents',fields:['doc_type','supplier','invoice_no','date','truck','amount','vat','description','confidence','manual_fields','status']},ai_alerts:{title:'AI Alerts',fields:['alert_type','severity','title','message','status']},users:{title:'Users',fields:['email','password','name','role']}
 };
 
 async function doLogin(){try{let r=await api('/auth/login',{method:'POST',body:{email:email.value,password:password.value}});token=r.token;user=r.user;localStorage.setItem('token',token);loginBox.classList.add('hidden');appBox.classList.remove('hidden');userEmail.innerText=user.email;await loadAll()}catch(e){loginMsg.innerText=e.message}}
@@ -163,3 +163,83 @@ async function scanSlip(){
   xhr.onerror = () => alert("Upload failed");
   xhr.send(fd);
 }
+
+async function renderAccounting(){
+  const sec=document.getElementById('accounting'); if(!sec)return;
+  let d={income:0,expense:0,profit:0,receivable:0,unpaid:[],recent:[]};
+  try{d=await api('/accounting/summary')}catch(e){console.warn(e)}
+  sec.innerHTML=`<div class="head"><h1>Accounting / Books</h1><button class="btn green" onclick="syncAccounting()">Sync From ERP</button></div>
+  <div class="accountGrid"><div class="card metric"><small>INCOME</small><h2>${money(d.income)}</h2></div><div class="card metric"><small>EXPENSES</small><h2>${money(d.expense)}</h2></div><div class="card metric"><small>BOOK PROFIT</small><h2>${money(d.profit)}</h2></div><div class="card metric"><small>RECEIVABLES</small><h2>${money(d.receivable)}</h2></div></div>
+  <div class="grid2"><div class="card"><h2>Recent Transactions</h2><div class="tableWrap"><table id="acctTrans"></table></div></div><div class="card"><h2>Unpaid Invoices</h2><div class="tableWrap"><table id="acctUnpaid"></table></div></div></div>
+  <div class="card"><h2>QuickBooks-style tools</h2><button class="btn" onclick="openModal('invoices')">Create Invoice</button> <button class="btn" onclick="openModal('payments')">Record Payment</button> <button class="btn" onclick="openModal('vendors')">Add Supplier</button> <button class="btn" onclick="openModal('customers')">Add Customer</button> <button class="btn gray" onclick="openModal('accounts')">Chart of Accounts</button><p class="help">Built-in accounting now. Official QuickBooks/Xero sync can be added later using their API.</p></div>`;
+  table(document.getElementById('acctTrans'),d.recent,['Date','Type','Account','Description','Debit','Credit'],r=>[r.date,r.type,r.account,r.description,money(r.debit),money(r.credit)]);
+  table(document.getElementById('acctUnpaid'),d.unpaid,['Invoice','Client','Amount','Paid','Balance'],r=>[r.invoice_no,r.client,money(r.amount),money(r.paid),money(Number(r.amount||0)-Number(r.paid||0))]);
+}
+async function syncAccounting(){try{await api('/accounting/sync',{method:'POST',body:{}});alert('Accounting synced from trips, diesel, payroll, maintenance and invoices.');await renderAccounting()}catch(e){alert(e.message)}}
+const oldShowAccounting=show; show=function(id,btn){oldShowAccounting(id,btn);if(id==='accounting')renderAccounting()};
+document.addEventListener('click',e=>{if(innerWidth<1000&&side.classList.contains('open')&&!side.contains(e.target)&&!e.target.closest('.mobileTop')&&!e.target.closest('.bottomNav'))side.classList.remove('open')});
+
+
+// V6 hourly GPS and Smart AI
+let gpsTimer=null;
+async function startHourlyGPS(){
+  if(gpsTimer) clearInterval(gpsTimer);
+  await sendGPS();
+  gpsTimer=setInterval(()=>sendGPS(),60*60*1000);
+  localStorage.setItem('hourlyGPS','on');
+  alert('Hourly GPS started while app is open. For true closed-app background GPS, package as APK with Capacitor.');
+}
+function stopHourlyGPS(){
+  if(gpsTimer) clearInterval(gpsTimer);
+  gpsTimer=null;
+  localStorage.setItem('hourlyGPS','off');
+  alert('Hourly GPS stopped.');
+}
+async function scanDoc(docType){
+  const inp=document.getElementById('aiFile_'+docType);
+  if(!inp.files[0]) return alert('Choose file first');
+  const out=document.getElementById('aiOut_'+docType);
+  out.innerHTML='Uploading and scanning...<div class="progressBar" id="aiBar_'+docType+'"></div>';
+  const fd=new FormData(); fd.append('file',inp.files[0]);
+  const xhr=new XMLHttpRequest();
+  xhr.open('POST','/api/ai/scan/'+docType);
+  xhr.setRequestHeader('Authorization','Bearer '+token);
+  xhr.upload.onprogress=e=>{if(e.lengthComputable){let b=document.getElementById('aiBar_'+docType); if(b)b.style.width=Math.round(e.loaded/e.total*100)+'%'}};
+  xhr.onload=()=>{let j={};try{j=JSON.parse(xhr.responseText)}catch{} out.innerText=JSON.stringify(j,null,2); loadAll(); if(j.scan_status==='partial_auto')alert('Document scanned. Check missing fields only.'); else alert('Some core fields need manual entry or AI quota/key issue.');};
+  xhr.onerror=()=>alert('Upload failed');
+  xhr.send(fd);
+}
+async function runFraudCheck(){
+  try{const r=await api('/ai/fraud-check',{method:'POST',body:{}});alert('Fraud check complete. Alerts created: '+r.alerts);await loadAll();renderSmartAI()}catch(e){alert(e.message)}
+}
+async function askAI(){
+  const q=document.getElementById('aiQuestion').value;
+  document.getElementById('aiAnswer').innerText='Thinking...';
+  const r=await api('/ai/assistant',{method:'POST',body:{question:q}});
+  document.getElementById('aiAnswer').innerText=r.answer;
+}
+function renderSmartAI(){
+  const sec=document.getElementById('smartai'); if(!sec)return;
+  sec.innerHTML=`<div class="head"><h1>Smart AI Tools</h1><button class="btn green" onclick="runFraudCheck()">Run Fraud Check</button></div>
+  <div class="aiBox">
+    ${aiScanCard('invoice','Invoice Scanner')}
+    ${aiScanCard('permit','Permit / License Scanner')}
+    ${aiScanCard('tyre','Tyre Invoice Scanner')}
+    ${aiScanCard('workshop','Workshop / Damage Photo AI')}
+    ${aiScanCard('border','Border Document Scanner')}
+    ${aiScanCard('pod','Delivery Note / POD Scanner')}
+  </div>
+  <div class="card"><h2>AI Assistant</h2><textarea id="aiQuestion" placeholder="Ask: Which truck has highest diesel cost? Which route is losing money?"></textarea><br><button class="btn" onclick="askAI()">Ask AI</button><pre id="aiAnswer"></pre></div>
+  <div class="card"><h2>GPS Auto Pin</h2><div class="gpsControls"><button class="btn green" onclick="startHourlyGPS()">Start 1 Hour GPS Pin</button><button class="btn red" onclick="stopHourlyGPS()">Stop GPS Auto Pin</button><button class="btn" onclick="sendGPS()">Send GPS Now</button></div><p class="help">Browser can send hourly GPS while the app/site is open. Closed-app background GPS needs APK/Capacitor.</p></div>`;
+}
+function aiScanCard(type,title){
+  return `<div class="card"><h2>${title}</h2><input id="aiFile_${type}" type="file" accept="image/*,.pdf"><br><button class="btn orange" onclick="scanDoc('${type}')">Scan</button><pre id="aiOut_${type}" class="help"></pre></div>`;
+}
+const oldShowV6=show;
+show=function(id,btn){oldShowV6(id,btn);if(id==='smartai')renderSmartAI();if(id==='gps')addGpsControls();}
+function addGpsControls(){
+  const sec=document.getElementById('gps'); if(!sec||sec.dataset.v6)return; sec.dataset.v6='1';
+  const div=document.createElement('div'); div.className='card'; div.innerHTML='<h2>Auto GPS Pin</h2><button class="btn green" onclick="startHourlyGPS()">Start hourly GPS while app is open</button> <button class="btn red" onclick="stopHourlyGPS()">Stop hourly GPS</button><p class="help">For real background GPS with closed app, build APK with Capacitor.</p>';
+  sec.prepend(div);
+}
+if(localStorage.getItem('hourlyGPS')==='on'){setTimeout(()=>startHourlyGPS(),3000)}
