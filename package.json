@@ -1,6 +1,6 @@
 {
-  "name": "angermund-railway-erp-v7-integrations-driver-ai",
-  "version": "7.0.0",
+  "name": "angermund-railway-erp-v8-roles-driver-app",
+  "version": "8.0.0",
   "type": "module",
   "scripts": {
     "start": "node server.js"

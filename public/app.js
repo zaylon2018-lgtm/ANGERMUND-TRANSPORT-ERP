@@ -285,3 +285,63 @@ async function processQueue(){const r=await api('/driver/process-queue',{method:
 async function autoSortDocs(){const r=await api('/ai/auto-sort',{method:'POST',body:{}});alert('Created records: '+r.created);await loadAll()}
 const oldShowV7=show;
 show=function(id,btn){oldShowV7(id,btn); if(id==='integrations')renderIntegrations(); if(id==='driverhub')renderDriverHub();}
+
+
+// V8 role-based driver app
+function currentRole(){ return String(user?.role || '').toLowerCase(); }
+function isDriverRole(){ return currentRole()==='driver'; }
+function isMechanicRole(){ return currentRole()==='mechanic'; }
+function isOfficeRole(){ return ['owner','admin','manager','dispatcher','accountant'].includes(currentRole()); }
+
+function applyRoleUI(){
+  document.body.classList.toggle('driver-mode', isDriverRole());
+  const officeModules=['accounting','smartai','integrations','users','payroll','workers','invoices','exports','customers','vendors','accounts','transactions','payments'];
+  document.querySelectorAll('.nav').forEach(btn=>{
+    const txt=btn.textContent.toLowerCase();
+    const officeText=['accounting','smart ai','integrations','users','payroll','site workers','invoices','exports','whatsapp reports','dropdown lists'].some(x=>txt.includes(x));
+    if(officeText) btn.classList.add('office-only');
+    if(isDriverRole() && officeText) btn.style.display='none';
+    if(isDriverRole() && txt.includes('driver app')) btn.style.display='block';
+  });
+  if(isDriverRole()){
+    show('driverapp');
+  }
+}
+
+async function renderDriverApp(){
+  const sec=document.getElementById('driverapp'); if(!sec)return;
+  let d={trips:[],diesel:[],queue:[],reminders:[],user:user||{}};
+  try{ d=await api('/driver/dashboard'); }catch(e){ console.warn(e); }
+  sec.innerHTML=`<div class="head"><h1>Driver App</h1><span class="roleBadge">${currentRole()||'user'}</span></div>
+  <div class="driverHomeGrid">
+    <div class="card driverOnlyCard"><h2>Quick Upload Docs</h2><p class="help">Upload diesel slips, PODs, permits or photos. Office/AI processes them later.</p><input id="driverFiles2" type="file" multiple accept="image/*,.pdf"><br><br><select id="driverDocType2"><option value="auto">Auto Detect</option><option value="diesel">Diesel Slip</option><option value="pod">POD / Delivery Note</option><option value="permit">Permit</option><option value="workshop">Damage/Workshop Photo</option></select><br><br><button class="btn" onclick="driverQuickUpload2()">Upload</button><pre id="driverOut2"></pre></div>
+    <div class="card driverOnlyCard"><h2>GPS Check-in</h2><button class="btn green" onclick="sendGPS()">Send GPS Now</button><br><br><button class="btn" onclick="startHourlyGPS()">Start Hourly GPS</button><br><br><button class="btn red" onclick="stopHourlyGPS()">Stop GPS</button><p class="help">Hourly GPS works while app/browser is open. Closed background GPS needs APK.</p></div>
+    <div class="card"><h2>My Trips</h2><div class="tableWrap"><table id="driverTripsTable"></table></div></div>
+    <div class="card"><h2>My Diesel Slips</h2><div class="tableWrap"><table id="driverDieselTable"></table></div></div>
+    <div class="card"><h2>Upload Queue</h2><div class="tableWrap"><table id="driverQueueTable"></table></div></div>
+    <div class="card"><h2>Reminders</h2>${(d.reminders||[]).map(r=>`<p>🔔 ${r.title||''} ${r.due_date||''}</p>`).join('')||'<p>No reminders</p>'}</div>
+  </div>`;
+  table(document.getElementById('driverTripsTable'),d.trips,['Date','Route','Truck','KM','Status'],r=>[r.date,r.route,r.truck,r.km,r.status]);
+  table(document.getElementById('driverDieselTable'),d.diesel,['Date','Truck','Litres','Amount','Status'],r=>[r.date,r.truck,r.litres,money(r.amount),r.scan_status]);
+  table(document.getElementById('driverQueueTable'),d.queue,['Type','Status','Created'],r=>[r.doc_type,r.status,r.created_at]);
+}
+async function driverQuickUpload2(){
+  const files=document.getElementById('driverFiles2').files;
+  if(!files.length)return alert('Choose documents first');
+  const fd=new FormData(); [...files].forEach(f=>fd.append('files',f)); fd.append('doc_type',document.getElementById('driverDocType2').value);
+  driverOut2.innerText='Uploading...';
+  const r=await fetch('/api/driver/quick-upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
+  const j=await r.json(); driverOut2.innerText=JSON.stringify(j,null,2); await renderDriverApp();
+}
+
+const oldShowV8=show;
+show=function(id,btn){
+  oldShowV8(id,btn);
+  if(id==='driverapp')renderDriverApp();
+};
+
+const oldLoadAllV8=loadAll;
+loadAll=async function(){
+  await oldLoadAllV8();
+  applyRoleUI();
+};

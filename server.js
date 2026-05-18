@@ -111,6 +111,21 @@ init().catch(console.error);
 
 function auth(req,res,next){try{req.user=jwt.verify((req.headers.authorization||'').replace('Bearer ',''),SECRET);next()}catch{res.status(401).json({error:'Not logged in'})}}
 function admin(req,res,next){if(!['admin','manager'].includes(req.user.role))return res.status(403).json({error:'No permission'});next()}
+
+function roleName(req){ return String(req.user?.role || '').toLowerCase(); }
+function isOffice(req){ return ['owner','admin','manager','dispatcher','accountant'].includes(roleName(req)); }
+function isDriver(req){ return roleName(req)==='driver'; }
+function canAccessTable(req, table){
+  if(isOffice(req)) return true;
+  if(isDriver(req)){
+    return ['trips','diesel','gps','upload_queue','drivers','reminders'].includes(table);
+  }
+  if(roleName(req)==='mechanic'){
+    return ['trucks','maintenance','tyres','workshop_jobs','upload_queue','reminders'].includes(table);
+  }
+  return false;
+}
+
 function safe(u){let {password_hash,...x}=u;return x}
 function tripCalc(t){let income=Number(t.km||0)*Number(t.rate_km||0);let cost=['diesel_cost','tolls','permits_cost','food_money','border_cost','repairs','other_cost'].reduce((a,k)=>a+Number(t[k]||0),0);return{income,cost,profit:income-cost}}
 
@@ -131,11 +146,11 @@ app.post('/api/auth/login',async(req,res)=>{let{email,password}=req.body;let r=a
 app.get('/api/me',auth,(req,res)=>res.json({user:req.user}));
 app.get('/api/options',auth,async(req,res)=>{let rows=(await pool.query('select type,value from masters order by type,value')).rows,out={};rows.forEach(r=>(out[r.type] ||= []).push(r.value));res.json(out)});
 app.get('/api/dashboard',auth,async(req,res)=>{let trips=(await pool.query('select * from trips order by created_at desc')).rows;let diesel=(await pool.query('select coalesce(sum(amount),0) v from diesel')).rows[0].v;let expenses=Number(diesel),revenue=0,km=0;trips.forEach(t=>{let c=tripCalc(t);revenue+=c.income;expenses+=c.cost;km+=Number(t.km||0)});let alerts=(await pool.query("select item||' - '||owner||' expires on '||expiry_date message from permits where expiry_date <= current_date + interval '45 days' union all select title||' due on '||due_date from reminders where status <> 'Closed' and due_date <= current_date + interval '14 days' limit 40")).rows;let gps=(await pool.query('select * from gps_points order by created_at desc limit 10')).rows;res.json({metrics:{revenue,expenses,profit:revenue-expenses,km,diesel:Number(diesel)},recent:trips.slice(0,8),alerts,gps})});
-app.get('/api/:table',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).json({error:'Unknown table'});let rows=(await pool.query(`select ${t==='users'?'id,email,name,role,created_at':'*'} from ${t} order by created_at desc limit 1000`)).rows;res.json({rows})});
+app.get('/api/:table',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).json({error:'Unknown table'});if(!canAccessTable(req,t) && t!=='users')return res.status(403).json({error:'No permission for this module'});let rows=(await pool.query(`select ${t==='users'?'id,email,name,role,created_at':'*'} from ${t} order by created_at desc limit 1000`)).rows;res.json({rows})});
 app.post('/api/users',auth,admin,async(req,res)=>{let{email,password,name,role}=req.body;let r=await pool.query('insert into users(email,password_hash,name,role) values($1,$2,$3,$4) returning id,email,name,role,created_at',[email,await bcrypt.hash(password||'password123',10),name,role||'driver']);res.json({row:r.rows[0]})});
 app.post('/api/gps',auth,async(req,res)=>{let{lat,lng,accuracy,driver,truck}=req.body;let r=await pool.query('insert into gps_points(email,driver,truck,lat,lng,accuracy) values($1,$2,$3,$4,$5,$6) returning *',[req.user.email,driver||req.user.name||req.user.email,truck||'',lat,lng,accuracy||0]);res.json({row:r.rows[0]})});
-app.post('/api/:table',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});let obj=req.body||{};if(t==='trips')obj.km=Number(obj.km||0)||Math.max(0,Number(obj.end_km||0)-Number(obj.start_km||0));let keys=Object.keys(obj).filter(k=>obj[k]!==''&&obj[k]!==undefined);if(!keys.length)return res.status(400).json({error:'No data'});let vals=keys.map(k=>obj[k]);let r=await pool.query(`insert into ${t}(${keys.join(',')}) values(${keys.map((_,i)=>'$'+(i+1)).join(',')}) returning *`,vals);res.json({row:r.rows[0]})});
-app.put('/api/:table/:id',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});let keys=Object.keys(req.body||{});let vals=keys.map(k=>req.body[k]);let r=await pool.query(`update ${t} set ${keys.map((k,i)=>k+'=$'+(i+1)).join(',')} where id=$${keys.length+1} returning *`,[...vals,req.params.id]);res.json({row:r.rows[0]})});
+app.post('/api/:table',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});if(!canAccessTable(req,t))return res.status(403).json({error:'No permission for this module'});let obj=req.body||{};if(t==='trips')obj.km=Number(obj.km||0)||Math.max(0,Number(obj.end_km||0)-Number(obj.start_km||0));let keys=Object.keys(obj).filter(k=>obj[k]!==''&&obj[k]!==undefined);if(!keys.length)return res.status(400).json({error:'No data'});let vals=keys.map(k=>obj[k]);let r=await pool.query(`insert into ${t}(${keys.join(',')}) values(${keys.map((_,i)=>'$'+(i+1)).join(',')}) returning *`,vals);res.json({row:r.rows[0]})});
+app.put('/api/:table/:id',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});if(!canAccessTable(req,t))return res.status(403).json({error:'No permission for this module'});let keys=Object.keys(req.body||{});let vals=keys.map(k=>req.body[k]);let r=await pool.query(`update ${t} set ${keys.map((k,i)=>k+'=$'+(i+1)).join(',')} where id=$${keys.length+1} returning *`,[...vals,req.params.id]);res.json({row:r.rows[0]})});
 app.delete('/api/:table/:id',auth,admin,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});await pool.query(`delete from ${t} where id=$1`,[req.params.id]);res.json({ok:true})});
 
 
@@ -457,6 +472,16 @@ app.post('/api/webhook/test',auth,admin,async(req,res)=>{
   const result=await postWebhook('test',{message:'Angermund ERP webhook test',user:req.user.email});
   await logIntegration('webhook','out','test','Webhook test sent',result);
   res.json(result);
+});
+
+
+app.get('/api/driver/dashboard',auth,async(req,res)=>{
+  const name=req.user.name || req.user.email;
+  const trips=(await pool.query("select * from trips where lower(driver)=lower($1) or lower(driver)=lower($2) order by created_at desc limit 20",[name, req.user.email])).rows;
+  const diesel=(await pool.query("select * from diesel where lower(driver)=lower($1) or lower(driver)=lower($2) order by created_at desc limit 20",[name, req.user.email])).rows;
+  const queue=(await pool.query("select * from upload_queue where lower(driver)=lower($1) or lower(driver)=lower($2) order by created_at desc limit 20",[name, req.user.email])).rows;
+  const reminders=(await pool.query("select * from reminders where status <> 'Closed' order by due_date asc limit 10")).rows;
+  res.json({trips,diesel,queue,reminders,user:req.user});
 });
 
 app.post('/api/driver/quick-upload',auth,upload.array('files',10),async(req,res)=>{

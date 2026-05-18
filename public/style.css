@@ -44,3 +44,14 @@
 .integrationGrid,.driverGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .bigDrop{border:2px dashed #2e8cff;border-radius:18px;padding:20px;text-align:center;background:#0d1728aa}
 @media(max-width:1000px){.integrationGrid,.driverGrid{grid-template-columns:1fr}.bigDrop input{width:100%}}
+
+/* V8 driver app / role UI */
+.driverHomeGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.roleBadge{display:inline-block;background:#1768d8;border-radius:99px;padding:4px 10px;margin-top:6px}
+.driverOnlyCard{border:1px solid #2e8cff66}
+@media(max-width:1000px){
+  .driverHomeGrid{grid-template-columns:1fr}
+  body.driver-mode .side .office-only{display:none!important}
+  body.driver-mode .side{width:82vw!important}
+  body.driver-mode .main{padding-bottom:96px!important}
+}
