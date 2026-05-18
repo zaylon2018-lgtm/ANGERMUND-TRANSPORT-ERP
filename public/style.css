@@ -39,3 +39,8 @@
 .statusDot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#38d66b;margin-right:6px}
 .gpsControls{display:flex;gap:8px;flex-wrap:wrap}
 @media(max-width:1000px){.aiBox{grid-template-columns:1fr}.gpsControls .btn{width:100%;}.side{z-index:60}.bottomNav{z-index:70}.quickFab{z-index:80}}
+
+/* V7 integrations and driver time-saver */
+.integrationGrid,.driverGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.bigDrop{border:2px dashed #2e8cff;border-radius:18px;padding:20px;text-align:center;background:#0d1728aa}
+@media(max-width:1000px){.integrationGrid,.driverGrid{grid-template-columns:1fr}.bigDrop input{width:100%}}

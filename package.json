@@ -1,6 +1,6 @@
 {
-  "name": "angermund-railway-erp-v2",
-  "version": "2.0.0",
+  "name": "angermund-railway-erp-v7-integrations-driver-ai",
+  "version": "7.0.0",
   "type": "module",
   "scripts": {
     "start": "node server.js"

@@ -19,7 +19,7 @@ app.use(express.static(path.join(__dirname,'public')));
 const pool=new pg.Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_URL?{rejectUnauthorized:false}:false});
 const upload=multer({dest:path.join(__dirname,'uploads'),limits:{fileSize:8*1024*1024}});
 
-const tableMap={trips:'trips',trucks:'trucks',drivers:'drivers',diesel:'diesel',permits:'permits',payroll:'payroll',workers:'workers',maintenance:'maintenance',tyres:'tyres',workshop:'workshop_jobs',fines:'fines_damages',border:'border_logs',gps:'gps_points',invoices:'invoices',users:'users',reminders:'reminders',masters:'masters',accounts:'accounts',transactions:'account_transactions',vendors:'vendors',customers:'customers',payments:'payments',ai_documents:'ai_documents',ai_alerts:'ai_alerts'};
+const tableMap={trips:'trips',trucks:'trucks',drivers:'drivers',diesel:'diesel',permits:'permits',payroll:'payroll',workers:'workers',maintenance:'maintenance',tyres:'tyres',workshop:'workshop_jobs',fines:'fines_damages',border:'border_logs',gps:'gps_points',invoices:'invoices',users:'users',reminders:'reminders',masters:'masters',accounts:'accounts',transactions:'account_transactions',vendors:'vendors',customers:'customers',payments:'payments',ai_documents:'ai_documents',ai_alerts:'ai_alerts',upload_queue:'upload_queue',integration_logs:'integration_logs'};
 
 const schema=`
 create table if not exists users(id serial primary key,email text unique not null,password_hash text not null,name text,role text default 'admin',created_at timestamptz default now());
@@ -39,6 +39,29 @@ create table if not exists fines_damages(id serial primary key,date date default
 create table if not exists border_logs(id serial primary key,date date default current_date,truck text,driver text,border_post text,direction text,arrival_time text,release_time text,fees numeric default 0,delay_reason text,created_at timestamptz default now());
 create table if not exists gps_points(id serial primary key,email text,driver text,truck text,lat numeric,lng numeric,accuracy numeric,created_at timestamptz default now());
 
+
+
+create table if not exists upload_queue(
+  id serial primary key,
+  driver text,
+  truck text,
+  doc_type text,
+  file_url text,
+  status text default 'Queued',
+  scan_status text,
+  result_json jsonb default '{}'::jsonb,
+  created_records text,
+  created_at timestamptz default now()
+);
+create table if not exists integration_logs(
+  id serial primary key,
+  integration text,
+  direction text,
+  status text,
+  message text,
+  payload jsonb default '{}'::jsonb,
+  created_at timestamptz default now()
+);
 
 create table if not exists ai_documents(
   id serial primary key,
@@ -90,6 +113,19 @@ function auth(req,res,next){try{req.user=jwt.verify((req.headers.authorization||
 function admin(req,res,next){if(!['admin','manager'].includes(req.user.role))return res.status(403).json({error:'No permission'});next()}
 function safe(u){let {password_hash,...x}=u;return x}
 function tripCalc(t){let income=Number(t.km||0)*Number(t.rate_km||0);let cost=['diesel_cost','tolls','permits_cost','food_money','border_cost','repairs','other_cost'].reduce((a,k)=>a+Number(t[k]||0),0);return{income,cost,profit:income-cost}}
+
+
+function csvEscape(v){ return '"' + String(v ?? '').replace(/"/g,'""') + '"'; }
+async function logIntegration(integration,direction,status,message,payload={}){
+  try{ await pool.query("insert into integration_logs(integration,direction,status,message,payload) values($1,$2,$3,$4,$5)",[integration,direction,status,message,payload]); }catch(e){ console.error(e); }
+}
+async function postWebhook(event,payload){
+  if(!process.env.WEBHOOK_URL) return {skipped:true};
+  try{
+    const resp=await fetch(process.env.WEBHOOK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event,payload})});
+    return {ok:resp.ok,status:resp.status};
+  }catch(e){ return {ok:false,error:e.message}; }
+}
 
 app.post('/api/auth/login',async(req,res)=>{let{email,password}=req.body;let r=await pool.query('select * from users where lower(email)=lower($1)',[email]);if(!r.rowCount||!await bcrypt.compare(password||'',r.rows[0].password_hash))return res.status(401).json({error:'Invalid login'});let user=safe(r.rows[0]);res.json({user,token:jwt.sign(user,SECRET,{expiresIn:'7d'})})});
 app.get('/api/me',auth,(req,res)=>res.json({user:req.user}));
@@ -362,6 +398,124 @@ app.post('/api/ai/assistant',auth,async(req,res)=>{
     const data=await resp.json();
     res.json({answer:data.choices?.[0]?.message?.content||data.error?.message||'No answer'});
   }catch(e){res.json({answer:e.message})}
+});
+
+
+app.get('/api/integrations/status',auth,async(req,res)=>{
+  res.json({
+    quickbooks:{
+      configured:!!(process.env.QUICKBOOKS_CLIENT_ID && process.env.QUICKBOOKS_CLIENT_SECRET),
+      connected:!!(process.env.QUICKBOOKS_ACCESS_TOKEN || process.env.QUICKBOOKS_REFRESH_TOKEN || process.env.QUICKBOOKS_REALM_ID),
+      realm_id:process.env.QUICKBOOKS_REALM_ID ? 'set' : 'missing'
+    },
+    xero:{
+      configured:!!(process.env.XERO_CLIENT_ID && process.env.XERO_CLIENT_SECRET),
+      connected:!!(process.env.XERO_ACCESS_TOKEN && process.env.XERO_TENANT_ID)
+    },
+    webhook:{configured:!!process.env.WEBHOOK_URL}
+  });
+});
+
+app.get('/api/quickbooks/connect-url',auth,admin,async(req,res)=>{
+  if(!process.env.QUICKBOOKS_CLIENT_ID || !process.env.QUICKBOOKS_REDIRECT_URI){
+    return res.json({error:'Set QUICKBOOKS_CLIENT_ID and QUICKBOOKS_REDIRECT_URI in Railway first.'});
+  }
+  const state=Math.random().toString(36).slice(2);
+  const scope=encodeURIComponent('com.intuit.quickbooks.accounting openid profile email');
+  const url=`https://appcenter.intuit.com/connect/oauth2?client_id=${process.env.QUICKBOOKS_CLIENT_ID}&scope=${scope}&redirect_uri=${encodeURIComponent(process.env.QUICKBOOKS_REDIRECT_URI)}&response_type=code&access_type=offline&state=${state}`;
+  res.json({url});
+});
+
+app.get('/api/quickbooks/callback',async(req,res)=>{
+  await logIntegration('quickbooks','oauth','callback','Received QuickBooks callback',{query:req.query});
+  res.send('QuickBooks callback received. Copy the code/realmId from the URL into Railway variables or finish token exchange in the next version.');
+});
+
+app.post('/api/quickbooks/export',auth,admin,async(req,res)=>{
+  const rows=(await pool.query("select * from account_transactions order by date, id")).rows;
+  const csv=['Date,Type,Account,Description,Reference,Debit,Credit'].concat(rows.map(r=>[
+    r.date,r.type,r.account,r.description,r.reference,r.debit,r.credit
+  ].map(csvEscape).join(','))).join('\\n');
+  await logIntegration('quickbooks','export','ready','QuickBooks CSV export generated',{rows:rows.length});
+  res.setHeader('Content-Type','text/csv');
+  res.setHeader('Content-Disposition','attachment; filename=quickbooks-accounting-export.csv');
+  res.send(csv);
+});
+
+app.post('/api/xero/export',auth,admin,async(req,res)=>{
+  const inv=(await pool.query("select * from invoices order by date desc")).rows;
+  const csv=['ContactName,InvoiceNumber,InvoiceDate,DueDate,Description,Quantity,UnitAmount,AccountCode,TaxType'].concat(inv.map(i=>[
+    i.client,i.invoice_no,i.date,i.date,i.route||'Transport service',1,i.amount,'200','No VAT'
+  ].map(csvEscape).join(','))).join('\\n');
+  await logIntegration('xero','export','ready','Xero invoice CSV export generated',{rows:inv.length});
+  res.setHeader('Content-Type','text/csv');
+  res.setHeader('Content-Disposition','attachment; filename=xero-invoice-export.csv');
+  res.send(csv);
+});
+
+app.post('/api/webhook/test',auth,admin,async(req,res)=>{
+  const result=await postWebhook('test',{message:'Angermund ERP webhook test',user:req.user.email});
+  await logIntegration('webhook','out','test','Webhook test sent',result);
+  res.json(result);
+});
+
+app.post('/api/driver/quick-upload',auth,upload.array('files',10),async(req,res)=>{
+  const driver=req.body.driver || req.user.name || req.user.email;
+  const truck=req.body.truck || '';
+  const docType=req.body.doc_type || 'auto';
+  const created=[];
+  for(const file of req.files||[]){
+    const fileUrl='/uploads/'+file.filename;
+    const q=await pool.query("insert into upload_queue(driver,truck,doc_type,file_url,status) values($1,$2,$3,$4,'Queued') returning *",[driver,truck,docType,fileUrl]);
+    created.push(q.rows[0]);
+  }
+  res.json({queued:created.length,rows:created});
+});
+
+app.post('/api/driver/process-queue',auth,async(req,res)=>{
+  const limit=Number(req.body?.limit||10);
+  const rows=(await pool.query("select * from upload_queue where status in ('Queued','Manual Required') order by created_at asc limit $1",[limit])).rows;
+  const processed=[];
+  for(const q of rows){
+    const fullPath=path.join(__dirname,q.file_url.replace('/uploads/','uploads/'));
+    if(!fs.existsSync(fullPath)){ await pool.query("update upload_queue set status='File Missing' where id=$1",[q.id]); continue; }
+    const scan=await scanDocumentAI(fullPath,q.doc_type||'auto');
+    const hasUseful=scan.amount!=null || scan.invoice_no || scan.description;
+    let status=hasUseful?'Scanned':'Manual Required';
+    let created_records='';
+    if(hasUseful){
+      await pool.query(
+        "insert into ai_documents(doc_type,file_url,supplier,invoice_no,date,truck,amount,vat,description,confidence,manual_fields,scan_json,status) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        [q.doc_type,q.file_url,scan.supplier||'',scan.invoice_no||'',scan.date||null,scan.truck||q.truck||'',scan.amount||0,scan.vat||0,scan.description||'',scan.confidence||0,(scan.manual_fields||[]).join(', '),scan,status]
+      );
+      created_records='ai_documents';
+    }
+    await pool.query("update upload_queue set status=$1, scan_status=$2, result_json=$3, created_records=$4 where id=$5",[status,status,scan,created_records,q.id]);
+    processed.push({id:q.id,status,scan});
+  }
+  res.json({processed});
+});
+
+app.post('/api/ai/auto-sort',auth,async(req,res)=>{
+  const docs=(await pool.query("select * from ai_documents where status in ('Scanned','Manual Required') order by created_at desc limit 50")).rows;
+  let made=0;
+  for(const d of docs){
+    if(d.doc_type==='invoice' && Number(d.amount||0)>0 && d.invoice_no){
+      const exists=await pool.query("select id from invoices where invoice_no=$1",[d.invoice_no]);
+      if(!exists.rowCount){
+        await pool.query("insert into invoices(client,invoice_no,date,amount,status,route) values($1,$2,$3,$4,'Unpaid',$5)",[d.supplier||'Unknown',d.invoice_no,d.date||null,d.amount,d.description||'AI invoice']);
+        made++;
+      }
+    }
+    if(d.doc_type==='permit' && d.date && d.invoice_no){
+      const exists=await pool.query("select id from permits where item=$1 and owner=$2",[d.invoice_no,d.truck||d.supplier||'']);
+      if(!exists.rowCount){
+        await pool.query("insert into permits(item,owner,type,expiry_date,cost,status) values($1,$2,'AI scanned permit',$3,$4,'Valid')",[d.invoice_no,d.truck||d.supplier||'',d.date,d.amount||0]);
+        made++;
+      }
+    }
+  }
+  res.json({created:made});
 });
 
 app.get('/api/export/:table/:format',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).send('Unknown');let rows=(await pool.query(`select * from ${t} order by created_at desc`)).rows;let f=req.params.format;if(f==='json')return res.json(rows);if(f==='xlsx'){let wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),req.params.table);res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.xlsx`);return res.send(XLSX.write(wb,{type:'buffer',bookType:'xlsx'}))}if(f==='csv'){res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.csv`);let h=Object.keys(rows[0]||{});return res.send([h.join(','),...rows.map(r=>h.map(k=>JSON.stringify(r[k]??'')).join(','))].join('\\n'))}let doc=new PDFDocument({margin:30});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.pdf`);doc.pipe(res);doc.fontSize(18).text('Angermund Transport - '+req.params.table.toUpperCase());rows.slice(0,200).forEach((r,i)=>doc.fontSize(8).text((i+1)+'. '+JSON.stringify(r)));doc.end()});

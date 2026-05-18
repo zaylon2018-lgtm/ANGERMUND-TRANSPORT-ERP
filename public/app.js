@@ -24,7 +24,7 @@ const tables={
  invoices:{title:'Invoices',fields:['date','client','invoice_no','route','amount','paid','status']},
  reminders:{title:'Reminders',fields:['title','module','related_name','due_date','priority','status','notes']},
  masters:{title:'Dropdown Lists',fields:['type','value']},
- accounts:{title:'Accounts',fields:['code','name','type','balance']},transactions:{title:'Transactions',fields:['date','type','account','description','reference','debit','credit']},vendors:{title:'Vendors',fields:['name','phone','email','vat_no']},customers:{title:'Customers',fields:['name','phone','email','vat_no']},payments:{title:'Payments',fields:['date','party','method','reference','amount','status','notes']},ai_documents:{title:'AI Documents',fields:['doc_type','supplier','invoice_no','date','truck','amount','vat','description','confidence','manual_fields','status']},ai_alerts:{title:'AI Alerts',fields:['alert_type','severity','title','message','status']},users:{title:'Users',fields:['email','password','name','role']}
+ accounts:{title:'Accounts',fields:['code','name','type','balance']},transactions:{title:'Transactions',fields:['date','type','account','description','reference','debit','credit']},vendors:{title:'Vendors',fields:['name','phone','email','vat_no']},customers:{title:'Customers',fields:['name','phone','email','vat_no']},payments:{title:'Payments',fields:['date','party','method','reference','amount','status','notes']},ai_documents:{title:'AI Documents',fields:['doc_type','supplier','invoice_no','date','truck','amount','vat','description','confidence','manual_fields','status']},ai_alerts:{title:'AI Alerts',fields:['alert_type','severity','title','message','status']},upload_queue:{title:'Upload Queue',fields:['driver','truck','doc_type','file_url','status','scan_status','created_records']},integration_logs:{title:'Integration Logs',fields:['integration','direction','status','message']},users:{title:'Users',fields:['email','password','name','role']}
 };
 
 async function doLogin(){try{let r=await api('/auth/login',{method:'POST',body:{email:email.value,password:password.value}});token=r.token;user=r.user;localStorage.setItem('token',token);loginBox.classList.add('hidden');appBox.classList.remove('hidden');userEmail.innerText=user.email;await loadAll()}catch(e){loginMsg.innerText=e.message}}
@@ -243,3 +243,45 @@ function addGpsControls(){
   sec.prepend(div);
 }
 if(localStorage.getItem('hourlyGPS')==='on'){setTimeout(()=>startHourlyGPS(),3000)}
+
+
+// V7 Integrations and Driver Hub
+async function renderIntegrations(){
+  const sec=document.getElementById('integrations'); if(!sec)return;
+  let st={quickbooks:{},xero:{},webhook:{}};
+  try{st=await api('/integrations/status')}catch(e){}
+  sec.innerHTML=`<div class="head"><h1>Integrations</h1><button class="btn" onclick="loadAll()">Refresh</button></div>
+  <div class="integrationGrid">
+    <div class="card"><h2>QuickBooks</h2><p><span class="statusDot"></span>Configured: ${st.quickbooks?.configured?'Yes':'No'}<br>Connected: ${st.quickbooks?.connected?'Yes':'No'}</p><button class="btn" onclick="quickbooksConnect()">Connect URL</button> <button class="btn gray" onclick="downloadQB()">Export CSV</button></div>
+    <div class="card"><h2>Xero</h2><p><span class="statusDot"></span>Configured: ${st.xero?.configured?'Yes':'No'}<br>Connected: ${st.xero?.connected?'Yes':'No'}</p><button class="btn gray" onclick="downloadXero()">Export Xero CSV</button></div>
+    <div class="card"><h2>Make/Zapier Webhook</h2><p>Configured: ${st.webhook?.configured?'Yes':'No'}</p><button class="btn green" onclick="testWebhook()">Send Test</button></div>
+  </div>
+  <div class="card"><h2>How it works</h2><p class="help">This version has export/API foundations. Official QuickBooks/Xero live sync needs their developer keys and OAuth approval. CSV exports can import into accounting immediately.</p></div>`;
+}
+async function quickbooksConnect(){const r=await api('/quickbooks/connect-url'); if(r.url) window.open(r.url,'_blank'); else alert(r.error||'Not configured')}
+function downloadQB(){window.open('/api/quickbooks/export','_blank')}
+function downloadXero(){window.open('/api/xero/export','_blank')}
+async function testWebhook(){const r=await api('/webhook/test',{method:'POST',body:{}});alert(JSON.stringify(r))}
+function renderDriverHub(){
+  const sec=document.getElementById('driverhub'); if(!sec)return;
+  sec.innerHTML=`<div class="head"><h1>Driver Hub</h1><button class="btn green" onclick="processQueue()">Process Queue</button></div>
+  <div class="driverGrid">
+    <div class="card"><h2>One Tap Upload</h2><div class="bigDrop"><input id="driverFiles" type="file" multiple accept="image/*,.pdf"><br><br><select id="driverDocType"><option value="auto">Auto Detect</option><option value="diesel">Diesel</option><option value="invoice">Invoice</option><option value="permit">Permit</option><option value="tyre">Tyre</option><option value="workshop">Workshop/Damage</option><option value="pod">POD/Delivery Note</option></select><br><br><button class="btn" onclick="driverQuickUpload()">Upload Queue</button></div><pre id="driverOut"></pre></div>
+    <div class="card"><h2>Driver Actions</h2><button class="btn green" onclick="sendGPS()">Send GPS Now</button><br><br><button class="btn" onclick="openModal('trips')">Add Trip</button><br><br><button class="btn" onclick="openModal('diesel')">Manual Diesel</button><p class="help">Driver uploads many docs once. Office/AI processes them later so driver does not waste time typing.</p></div>
+    <div class="card"><h2>Automation</h2><button class="btn orange" onclick="autoSortDocs()">Auto-create records</button><p class="help">Creates invoices/permits from scanned AI documents where safe.</p></div>
+  </div>
+  <div class="card"><h2>Upload Queue</h2><div class="tableWrap"><table id="queueTable"></table></div></div>`;
+  if(cache.upload_queue) table(document.getElementById('queueTable'),cache.upload_queue,['Driver','Truck','Type','Status','Created'],r=>[r.driver,r.truck,r.doc_type,r.status,r.created_records]);
+}
+async function driverQuickUpload(){
+  const files=document.getElementById('driverFiles').files;
+  if(!files.length)return alert('Choose documents first');
+  const fd=new FormData(); [...files].forEach(f=>fd.append('files',f)); fd.append('doc_type',document.getElementById('driverDocType').value);
+  driverOut.innerText='Uploading...';
+  const r=await fetch('/api/driver/quick-upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
+  const j=await r.json(); driverOut.innerText=JSON.stringify(j,null,2); await loadAll(); renderDriverHub();
+}
+async function processQueue(){const r=await api('/driver/process-queue',{method:'POST',body:{limit:10}});alert('Processed '+(r.processed?.length||0)+' documents');await loadAll();renderDriverHub()}
+async function autoSortDocs(){const r=await api('/ai/auto-sort',{method:'POST',body:{}});alert('Created records: '+r.created);await loadAll()}
+const oldShowV7=show;
+show=function(id,btn){oldShowV7(id,btn); if(id==='integrations')renderIntegrations(); if(id==='driverhub')renderDriverHub();}
