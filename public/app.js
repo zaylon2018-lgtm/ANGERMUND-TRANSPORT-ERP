@@ -52,3 +52,52 @@ function renderExports(){exportBox.innerHTML=Object.keys(tables).filter(t=>t!=='
 function makeWhatsApp(showMsg=true){let trips=cache.trips||[];let rev=trips.reduce((a,t)=>a+tripCalc(t).income,0),cost=trips.reduce((a,t)=>a+tripCalc(t).cost,0),km=trips.reduce((a,t)=>a+Number(t.km||0),0);waText.value=`ANGERMUND TRANSPORT REPORT\nDate: ${new Date().toLocaleDateString()}\nTrips: ${trips.length}\nRevenue: ${money(rev)}\nCosts: ${money(cost)}\nProfit: ${money(rev-cost)}\nKM: ${km.toLocaleString()}`;if(showMsg)alert('WhatsApp report ready')}
 function openWhatsApp(){window.open('https://wa.me/?text='+encodeURIComponent(waText.value),'_blank')}
 if(token){api('/me').then(r=>{user=r.user;loginBox.classList.add('hidden');appBox.classList.remove('hidden');userEmail.innerText=user.email;loadAll()}).catch(()=>logout())}
+
+
+// V3 quick mobile actions + swipe drawer
+function openQuickAdd(){
+  const choice = prompt("Quick add: trip, diesel, gps, invoice, reminder", "diesel");
+  if(!choice) return;
+  if(choice === "gps") return sendGPS();
+  if(tables[choice]) openModal(choice);
+}
+let touchStartX = 0;
+document.addEventListener("touchstart", e => { touchStartX = e.touches[0].clientX; }, {passive:true});
+document.addEventListener("touchend", e => {
+  const x = e.changedTouches[0].clientX;
+  if(touchStartX < 40 && x > 120) side.classList.add("open");
+  if(touchStartX > 180 && x < 80) side.classList.remove("open");
+}, {passive:true});
+
+// Replace scanSlip with progress and partial acceptance
+async function scanSlip(){
+  let f = slipFile.files[0];
+  if(!f) return alert("Choose slip photo");
+  scanResult.innerHTML = "Uploading and scanning...<div class='progressBar' id='upBar'></div>";
+  let bar = document.getElementById("upBar");
+  let fd = new FormData();
+  fd.append("slip", f);
+  let xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/slips/scan");
+  xhr.setRequestHeader("Authorization", "Bearer " + token);
+  xhr.upload.onprogress = e => { if(e.lengthComputable && bar) bar.style.width = Math.round(e.loaded/e.total*100)+"%"; };
+  xhr.onload = () => {
+    let j = {};
+    try { j = JSON.parse(xhr.responseText); } catch { alert("Scan failed"); return; }
+    scanResult.innerText = JSON.stringify(j.scan, null, 2);
+    const s = j.scan || {};
+    const row = {
+      date:s.date || "", truck:s.truck || "", driver:"",
+      litres:s.litres || "", amount:s.amount || "", price_per_litre:s.price_per_litre || "",
+      km:s.odometer || "", supplier:s.supplier || "", station:s.station || "",
+      slip_no:s.slip_no || "", pump:s.pump || "", attendant:s.attendant || "",
+      scan_status:j.scan_status || "manual_required", scan_confidence:s.confidence || 0,
+      manual_fields:(s.manual_fields || []).join(", ")
+    };
+    openModal("diesel", row);
+    if(j.scan_status !== "manual_required") alert("Core fields accepted. Only check missing fields.");
+    else alert("Only unreadable core fields must be entered manually.");
+  };
+  xhr.onerror = () => alert("Upload failed");
+  xhr.send(fd);
+}

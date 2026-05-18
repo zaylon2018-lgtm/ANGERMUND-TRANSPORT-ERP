@@ -1,1 +1,9 @@
-{"name":"Angermund Transport ERP V2","short_name":"Angermund ERP","display":"standalone","start_url":"/","theme_color":"#07101d","background_color":"#07101d"}
+{
+  "name": "Angermund Transport ERP",
+  "short_name": "Angermund ERP",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#07101d",
+  "background_color": "#07101d",
+  "icons": []
+}
