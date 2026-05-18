@@ -67,8 +67,122 @@ app.post('/api/:table',auth,async(req,res)=>{let t=tableMap[req.params.table];if
 app.put('/api/:table/:id',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});let keys=Object.keys(req.body||{});let vals=keys.map(k=>req.body[k]);let r=await pool.query(`update ${t} set ${keys.map((k,i)=>k+'=$'+(i+1)).join(',')} where id=$${keys.length+1} returning *`,[...vals,req.params.id]);res.json({row:r.rows[0]})});
 app.delete('/api/:table/:id',auth,admin,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});await pool.query(`delete from ${t} where id=$1`,[req.params.id]);res.json({ok:true})});
 
-async function scanAI(file){if(!process.env.OPENAI_API_KEY)return{manual_required:true,confidence:0,reason:'AI key not configured. Driver must enter manually.'};let b64=fs.readFileSync(file).toString('base64');let resp=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+process.env.OPENAI_API_KEY},body:JSON.stringify({model:process.env.AI_MODEL||'gpt-4o-mini',temperature:0,messages:[{role:'user',content:[{type:'text',text:'You are a fuel slip reader for a transport ERP. Extract every readable field. NEVER reject the full slip if only some fields are unclear. Return ONLY JSON: {supplier,station,date,time,truck,odometer,product,litres,price_per_litre,amount,pump,attendant,slip_no,confidence,manual_fields,manual_required,reason}. If a field is not clear, set only that field null and include its name in manual_fields. If amount and litres are readable, manual_required must be false even if truck/date/supplier are missing. Never guess unreadable numbers.'},{type:'image_url',image_url:{url:`data:image/jpeg;base64,${b64}`}}]}]})});let j=await resp.json();let txt=j.choices?.[0]?.message?.content||'{}';try{return JSON.parse(txt.replace(/```json|```/g,''))}catch{return{manual_required:true,confidence:0,reason:'AI unclear. Driver must enter manually.',raw:txt}}}
-app.post('/api/slips/scan',auth,upload.single('slip'),async(req,res)=>{if(!req.file)return res.status(400).json({error:'No file'});try{let scan=await scanAI(req.file.path);scan.slip_url='/uploads/'+req.file.filename;let ok=(scan.amount!=null && scan.litres!=null && Number(scan.confidence||0)>=.60);res.json({scan_status:ok?'partial_auto':'manual_required',scan,message:ok?'Core diesel fields accepted. Only missing fields need manual entry.':'Driver must enter unreadable core fields manually.'})}catch(e){res.json({scan_status:'manual_required',scan:{confidence:0,reason:e.message,slip_url:'/uploads/'+req.file.filename}})}});
+
+async function scanAI(file){
+  if(!process.env.OPENAI_API_KEY){
+    return {
+      manual_required:true,
+      confidence:0,
+      api_error:"OPENAI_API_KEY is not set in Railway Variables",
+      reason:"AI key not configured. Driver must enter manually."
+    };
+  }
+
+  const b64=fs.readFileSync(file).toString('base64');
+  const prompt = `You are a fuel slip OCR reader for a transport company.
+Extract all readable fields from the receipt image.
+
+Return ONLY valid JSON. No markdown.
+
+JSON format:
+{
+  "supplier": string|null,
+  "station": string|null,
+  "date": "YYYY-MM-DD"|null,
+  "time": string|null,
+  "truck": string|null,
+  "odometer": number|null,
+  "product": string|null,
+  "litres": number|null,
+  "price_per_litre": number|null,
+  "amount": number|null,
+  "pump": string|null,
+  "attendant": string|null,
+  "slip_no": string|null,
+  "confidence": number,
+  "manual_fields": string[],
+  "manual_required": boolean,
+  "reason": string
+}
+
+Rules:
+- Do NOT reject the full slip if only some fields are unclear.
+- If amount and litres are readable, manual_required must be false.
+- If a field is unclear, set only that field to null and include that field name in manual_fields.
+- Never guess unreadable numbers.
+- For Namibian receipts, amount may be shown as TOTAL, Amount in NAD, N$, NAD, or CREDIT CARD.
+- Litres may appear as L, litres, DIESEL line, SFSDiesel L.
+- If date shows 27/04/2026, return 2026-04-27.
+- If product says DIESEL-50PP or SFSDiesel, product is diesel.`;
+
+  let resp;
+  try{
+    resp=await fetch('https://api.openai.com/v1/chat/completions',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+process.env.OPENAI_API_KEY},
+      body:JSON.stringify({
+        model:process.env.AI_MODEL||'gpt-4o-mini',
+        temperature:0,
+        response_format:{type:"json_object"},
+        messages:[{role:'user',content:[
+          {type:'text',text:prompt},
+          {type:'image_url',image_url:{url:`data:image/jpeg;base64,${b64}`}}
+        ]}]
+      })
+    });
+  }catch(e){
+    return {manual_required:true,confidence:0,api_error:e.message,reason:"Could not reach OpenAI. Driver must enter manually."};
+  }
+
+  const data=await resp.json().catch(()=>({}));
+  if(!resp.ok || data.error){
+    return {
+      manual_required:true,
+      confidence:0,
+      api_error:data.error?.message || JSON.stringify(data),
+      reason:"OpenAI returned an error. Check Railway OPENAI_API_KEY, billing, model name and redeploy."
+    };
+  }
+
+  const txt=data.choices?.[0]?.message?.content || '{}';
+  try{
+    const parsed=JSON.parse(txt);
+    parsed.confidence = Number(parsed.confidence || 0);
+    parsed.manual_fields = Array.isArray(parsed.manual_fields) ? parsed.manual_fields : [];
+    if(parsed.amount != null && parsed.litres != null && parsed.confidence >= 0.45){
+      parsed.manual_required = false;
+    }
+    return parsed;
+  }catch(e){
+    return {manual_required:true,confidence:0,raw:txt,api_error:e.message,reason:"AI returned invalid JSON. Driver must enter manually."};
+  }
+}
+
+app.post('/api/slips/scan',auth,upload.single('slip'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'No file'});
+  try{
+    const scan=await scanAI(req.file.path);
+    scan.slip_url='/uploads/'+req.file.filename;
+
+    const hasCore = scan.amount!=null && scan.litres!=null;
+    const ok = hasCore && Number(scan.confidence||0) >= 0.45;
+
+    res.json({
+      scan_status: ok ? 'partial_auto' : 'manual_required',
+      scan,
+      message: ok
+        ? 'Core diesel fields accepted. Only missing fields need manual entry.'
+        : 'Driver must enter unreadable core fields manually. See api_error/reason.'
+    });
+  }catch(e){
+    res.json({
+      scan_status:'manual_required',
+      scan:{confidence:0,reason:e.message,slip_url:'/uploads/'+req.file.filename},
+      message:'Driver must enter manually.'
+    });
+  }
+});
+
 app.get('/api/export/:table/:format',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).send('Unknown');let rows=(await pool.query(`select * from ${t} order by created_at desc`)).rows;let f=req.params.format;if(f==='json')return res.json(rows);if(f==='xlsx'){let wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),req.params.table);res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.xlsx`);return res.send(XLSX.write(wb,{type:'buffer',bookType:'xlsx'}))}if(f==='csv'){res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.csv`);let h=Object.keys(rows[0]||{});return res.send([h.join(','),...rows.map(r=>h.map(k=>JSON.stringify(r[k]??'')).join(','))].join('\\n'))}let doc=new PDFDocument({margin:30});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.pdf`);doc.pipe(res);doc.fontSize(18).text('Angermund Transport - '+req.params.table.toUpperCase());rows.slice(0,200).forEach((r,i)=>doc.fontSize(8).text((i+1)+'. '+JSON.stringify(r)));doc.end()});
 app.get('/api/invoice/:id/pdf',auth,async(req,res)=>{let r=await pool.query('select * from invoices where id=$1',[req.params.id]);if(!r.rowCount)return res.status(404).send('Not found');let i=r.rows[0],doc=new PDFDocument({margin:50});res.setHeader('Content-Type','application/pdf');doc.pipe(res);doc.fontSize(22).text('ANGERMUND TRANSPORT',{align:'center'});doc.moveDown().fontSize(15).text('Invoice: '+(i.invoice_no||i.id));doc.text('Client: '+(i.client||''));doc.text('Route: '+(i.route||''));doc.text('Amount: N$ '+Number(i.amount||0).toFixed(2));doc.text('Paid: N$ '+Number(i.paid||0).toFixed(2));doc.text('Balance: N$ '+(Number(i.amount||0)-Number(i.paid||0)).toFixed(2));doc.end()});
 app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));

@@ -11,7 +11,7 @@ const tables={
  trips:{title:'Trips',fields:['trip_no','date','route','from_place','to_place','client','load_desc','truck','trailer','driver','start_km','end_km','km','rate_km','diesel_cost','tolls','permits_cost','food_money','border_cost','repairs','other_cost','status']},
  trucks:{title:'Fleet / Trucks',fields:['truck_no','trailer_no','make_model','driver','status','current_km','next_service_km','license_expiry','roadworthy_expiry','insurance_expiry']},
  drivers:{title:'Drivers',fields:['name','phone','email','license_expiry','pdp_expiry','passport_expiry','status']},
- diesel:{title:'Diesel + Slip AI',fields:['date','truck','driver','litres','amount','km','supplier','slip_no','scan_status','scan_confidence']},
+ diesel:{title:'Diesel + Slip AI',fields:['date','truck','driver','litres','price_per_litre','amount','km','supplier','station','slip_no','pump','attendant','scan_status','scan_confidence','manual_fields']},
  permits:{title:'Permits',fields:['item','owner','type','expiry_date','cost','status']},
  payroll:{title:'Payroll',fields:['date','employee','role','basic_salary','days_worked','overtime_hours','advance','deductions']},
  workers:{title:'Site Workers',fields:['date','name','site','role','status','hours','overtime','rate','advance']},
@@ -98,6 +98,68 @@ async function scanSlip(){
     if(j.scan_status !== "manual_required") alert("Core fields accepted. Only check missing fields.");
     else alert("Only unreadable core fields must be entered manually.");
   };
+  xhr.onerror = () => alert("Upload failed");
+  xhr.send(fd);
+}
+
+
+// V4 OCR scan fix: show exact API error and auto-fill readable fields only.
+async function scanSlip(){
+  let f = slipFile.files[0];
+  if(!f) return alert("Choose slip photo first");
+
+  scanResult.innerHTML = "Uploading and scanning...<div class='progressBar' id='upBar'></div>";
+  let bar = document.getElementById("upBar");
+
+  let fd = new FormData();
+  fd.append("slip", f);
+
+  let xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/slips/scan");
+  xhr.setRequestHeader("Authorization", "Bearer " + token);
+
+  xhr.upload.onprogress = e => {
+    if(e.lengthComputable && bar) bar.style.width = Math.round(e.loaded/e.total*100) + "%";
+  };
+
+  xhr.onload = () => {
+    let j = {};
+    try { j = JSON.parse(xhr.responseText); } catch { alert("Scan failed: server did not return JSON"); return; }
+
+    const s = j.scan || {};
+    scanResult.innerText = JSON.stringify(j, null, 2);
+
+    if(s.api_error){
+      alert("AI scan error: " + s.api_error);
+    }
+
+    const row = {
+      date:s.date || "",
+      truck:s.truck || "",
+      driver:"",
+      litres:s.litres || "",
+      price_per_litre:s.price_per_litre || "",
+      amount:s.amount || "",
+      km:s.odometer || "",
+      supplier:s.supplier || "",
+      station:s.station || "",
+      slip_no:s.slip_no || "",
+      pump:s.pump || "",
+      attendant:s.attendant || "",
+      scan_status:j.scan_status || "manual_required",
+      scan_confidence:s.confidence || 0,
+      manual_fields:Array.isArray(s.manual_fields) ? s.manual_fields.join(", ") : (s.manual_fields || "")
+    };
+
+    openModal("diesel", row);
+
+    if(j.scan_status === "partial_auto"){
+      alert("Slip read. Check missing fields only.");
+    } else {
+      alert("Core fields not clear or AI key/model issue. See scan result.");
+    }
+  };
+
   xhr.onerror = () => alert("Upload failed");
   xhr.send(fd);
 }
