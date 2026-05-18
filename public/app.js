@@ -345,3 +345,127 @@ loadAll=async function(){
   await oldLoadAllV8();
   applyRoleUI();
 };
+
+
+// V9: Dropdown + manual entry
+// Every dropdown now has "Other / Type manually".
+// New manual values save to the record, and for master dropdowns save to Dropdown Lists for next time.
+
+fieldHtml = function(f,row){
+  let val = row[f] ?? '';
+  let type = f.includes('date') || f.includes('expiry') ? 'date' : 'text';
+  let key = dropdowns[f];
+  let list = opts[key] || [];
+  if(list.length){
+    const inList = list.includes(String(val));
+    return `<label>${f}
+      <select name="${f}" onchange="toggleManualField(this,'${f}')">
+        <option value="">-- choose --</option>
+        ${list.map(x=>`<option ${x==val?'selected':''}>${x}</option>`).join('')}
+        <option value="__manual__" ${val && !inList ? 'selected' : ''}>Other / Type manually</option>
+      </select>
+      <input class="manualInput" name="${f}__manual" value="${val && !inList ? val : ''}" placeholder="Type new ${f}" style="display:${val && !inList ? 'block' : 'none'}">
+    </label>`;
+  }
+  return `<label>${f}<input name="${f}" value="${val}" ${type==='date'?'type="date"':''}></label>`;
+};
+
+function toggleManualField(sel, field){
+  const input = sel.parentElement.querySelector(`[name="${field}__manual"]`);
+  if(!input) return;
+  input.style.display = sel.value === "__manual__" ? "block" : "none";
+  if(sel.value === "__manual__") input.focus();
+}
+
+function valueFromModalField(form, f){
+  const el = form.elements[f];
+  if(!el) return "";
+  if(el.value === "__manual__"){
+    return form.elements[f+"__manual"]?.value || "";
+  }
+  return el.value;
+}
+
+async function saveDropdownValueIfNew(field, value){
+  if(!value) return;
+  const type = dropdowns[field];
+  if(!type || ['trucks','drivers','owners','workers_names'].includes(type)) return;
+  const existing = opts[type] || [];
+  if(existing.includes(value)) return;
+  try{
+    await api('/masters',{method:'POST',body:{type,value}});
+    opts[type] = [...existing, value];
+  }catch(e){
+    console.warn('Could not save dropdown value', field, value, e.message);
+  }
+}
+
+openModal = function(t,row={}){
+  modal.classList.add('show');
+  modalTitle.innerText = (row.id ? 'Edit ' : 'Add ') + tables[t].title;
+  modalForm.innerHTML = '<div class="formGrid">' + tables[t].fields.map(f=>fieldHtml(f,row)).join('') + '</div><br><button class="btn" type="submit">Save</button>';
+  modalForm.onsubmit = async(e)=>{
+    e.preventDefault();
+    let obj = {};
+    for(const f of tables[t].fields){
+      obj[f] = valueFromModalField(modalForm,f);
+      await saveDropdownValueIfNew(f,obj[f]);
+    }
+    try{
+      if(row.id) await api('/'+t+'/'+row.id,{method:'PUT',body:obj});
+      else await api('/'+t,{method:'POST',body:obj});
+      closeModal();
+      await loadAll();
+    }catch(err){
+      alert(err.message);
+    }
+  };
+};
+
+
+// V10: strict driver-only UI.
+// Drivers cannot see profit dashboard, tabs, accounting, admin, reports or office modules.
+const OFFICE_PAGES_V10 = [
+  'dashboard','accounting','smartai','integrations','exports','users','payroll','workers',
+  'invoices','trips','trucks','drivers','diesel','permits','maintenance','tyres','workshop',
+  'fines','border','gps','whatsapp','masters'
+];
+
+function isStrictDriver(){
+  return String(user?.role || '').toLowerCase() === 'driver';
+}
+
+function lockDriverUI(){
+  if(!isStrictDriver()) return;
+  document.body.classList.add('driver-mode');
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  const d = document.getElementById('driverapp');
+  if(d) d.classList.add('active');
+  document.querySelectorAll('.nav').forEach(n=>n.style.display='none');
+  document.querySelectorAll('.driver-nav').forEach(n=>n.style.display='block');
+  renderDriverApp();
+}
+
+const previousShowV10 = show;
+show = function(id, btn){
+  if(isStrictDriver() && id !== 'driverapp'){
+    id = 'driverapp';
+    btn = document.querySelector('.driver-nav');
+  }
+  previousShowV10(id, btn);
+  if(isStrictDriver()) lockDriverUI();
+};
+
+const previousLoadAllV10 = loadAll;
+loadAll = async function(){
+  await previousLoadAllV10();
+  if(isStrictDriver()) lockDriverUI();
+};
+
+const previousDoLoginV10 = doLogin;
+doLogin = async function(){
+  await previousDoLoginV10();
+  if(isStrictDriver()) lockDriverUI();
+};
+
+setTimeout(()=>{ if(isStrictDriver()) lockDriverUI(); },1000);

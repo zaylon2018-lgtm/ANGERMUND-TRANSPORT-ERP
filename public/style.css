@@ -55,3 +55,36 @@
   body.driver-mode .side{width:82vw!important}
   body.driver-mode .main{padding-bottom:96px!important}
 }
+
+/* V9 dropdown + manual entry */
+.manualInput{margin-top:6px!important;border:1px solid #2e8cff!important;background:#eef6ff!important;color:#111!important}
+
+/* V10: Driver lock-down */
+body.driver-mode .nav{display:none!important}
+body.driver-mode .nav.driver-nav{display:block!important}
+body.driver-mode #dashboard,
+body.driver-mode #accounting,
+body.driver-mode #smartai,
+body.driver-mode #integrations,
+body.driver-mode #exports,
+body.driver-mode #users,
+body.driver-mode #payroll,
+body.driver-mode #workers,
+body.driver-mode #invoices,
+body.driver-mode #trips,
+body.driver-mode #trucks,
+body.driver-mode #drivers,
+body.driver-mode #diesel,
+body.driver-mode #permits,
+body.driver-mode #maintenance,
+body.driver-mode #tyres,
+body.driver-mode #workshop,
+body.driver-mode #fines,
+body.driver-mode #border,
+body.driver-mode #gps,
+body.driver-mode #whatsapp,
+body.driver-mode #masters{display:none!important}
+body.driver-mode #driverapp{display:block!important}
+body.driver-mode .bottomNav button:not(.driver-allowed){display:none!important}
+body.driver-mode .bottomNav{grid-template-columns:1fr!important}
+body.driver-mode .quickFab{display:none!important}
