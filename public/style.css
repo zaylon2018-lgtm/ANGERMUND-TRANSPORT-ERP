@@ -88,3 +88,44 @@ body.driver-mode #driverapp{display:block!important}
 body.driver-mode .bottomNav button:not(.driver-allowed){display:none!important}
 body.driver-mode .bottomNav{grid-template-columns:1fr!important}
 body.driver-mode .quickFab{display:none!important}
+
+/* V12 Real PWA install polish */
+.installPrompt{
+  position:fixed;left:14px;right:14px;bottom:78px;z-index:9999;
+  background:#07111f;border:1px solid #2e8cff77;border-radius:18px;
+  box-shadow:0 20px 60px #000b;padding:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap
+}
+.installPrompt span{color:#b8c4d6;font-size:13px;flex:1}
+@media(min-width:900px){.installPrompt{left:auto;width:460px;bottom:20px}}
+body.standalone .installPrompt{display:none!important}
+
+
+/* V13 Android standalone fixes */
+html,body{
+  overscroll-behavior:none;
+}
+
+body.standalone{
+  padding-top: env(safe-area-inset-top, 0px)!important;
+}
+
+body.standalone .topbar,
+body.standalone .header,
+body.standalone .appHeader{
+  position:sticky;
+  top:0;
+  z-index:1000;
+}
+
+body.standalone .brandTitle{
+  font-size:15px!important;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+@media(max-width:768px){
+  .sidebar .logoText{
+    font-size:13px!important;
+  }
+}

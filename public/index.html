@@ -2,7 +2,15 @@
 <!doctype html><html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Angermund Transport Railway ERP V2</title>
-<link rel="manifest" href="/manifest.json"><link rel="stylesheet" href="/style.css">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#07101d">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Angermund ERP">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png"><link rel="stylesheet" href="/style.css">
 </head><body>
 <div class="login" id="loginBox"><h1>ANGERMUND<br><span class="blueText">TRANSPORT</span></h1><p>Railway ERP V2 Login</p><input id="email" placeholder="Email" value="admin@angermundtransport.com"><input id="password" type="password" placeholder="Password" value="admin123"><button onclick="doLogin()">Login</button><p id="loginMsg"></p></div>
 <div class="app hidden" id="appBox">
@@ -22,5 +30,12 @@
 <button onclick="show('accounting')"><b>💼</b>Books</button>
 <button class="driver-allowed" onclick="toggleMenu()"><b>☰</b>Menu</button>
 </nav>
+
+<div id="installPromptBox" class="installPrompt hidden">
+  <b>Install Angermund ERP</b>
+  <span>Install as an app, not a Chrome shortcut.</span>
+  <button class="btn green" onclick="installPWA()">Install App</button>
+  <button class="btn gray" onclick="dismissInstall()">Later</button>
+</div>
 <script src="/app.js"></script>
 <script>if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js')}</script></body></html>

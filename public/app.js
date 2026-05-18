@@ -507,3 +507,92 @@ renderSmartAI = function(){
   `;
   sec.appendChild(extra);
 };
+
+
+// V12 Real PWA install logic
+let deferredInstallPrompt = null;
+
+function isStandaloneApp(){
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
+function markStandalone(){
+  document.body.classList.toggle('standalone', isStandaloneApp());
+}
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  if(!localStorage.getItem('installDismissed') && !isStandaloneApp()){
+    const box=document.getElementById('installPromptBox');
+    if(box) box.classList.remove('hidden');
+  }
+});
+
+async function installPWA(){
+  if(!deferredInstallPrompt){
+    alert('If Install button does not appear yet: open Chrome menu ⋮ and choose Install app / Add to Home Screen after the page finishes loading.');
+    return;
+  }
+  deferredInstallPrompt.prompt();
+  const choice = await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  const box=document.getElementById('installPromptBox');
+  if(box) box.classList.add('hidden');
+  if(choice.outcome !== 'accepted'){
+    alert('Install cancelled. You can still use Chrome menu ⋮ > Install app.');
+  }
+}
+
+function dismissInstall(){
+  localStorage.setItem('installDismissed','1');
+  const box=document.getElementById('installPromptBox');
+  if(box) box.classList.add('hidden');
+}
+
+async function enablePushPlaceholder(){
+  if(!('Notification' in window)) return alert('Notifications not supported on this phone/browser.');
+  const perm = await Notification.requestPermission();
+  if(perm === 'granted'){
+    new Notification('Angermund ERP', {body:'Notifications enabled on this device.', icon:'/icon-192.png'});
+  } else {
+    alert('Notifications were not allowed.');
+  }
+}
+
+function handlePWAShortcuts(){
+  const p = new URLSearchParams(location.search);
+  const shortcut = p.get('shortcut');
+  if(!shortcut) return;
+  setTimeout(()=>{
+    if(shortcut === 'driverhub') show('driverhub');
+    if(shortcut === 'gps') show('gps');
+    if(shortcut === 'diesel') show('diesel');
+  },1500);
+}
+
+window.addEventListener('appinstalled', () => {
+  localStorage.setItem('pwaInstalled','1');
+  const box=document.getElementById('installPromptBox');
+  if(box) box.classList.add('hidden');
+  alert('Angermund ERP installed successfully.');
+});
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').then(()=>console.log('PWA service worker ready')).catch(console.warn);
+  navigator.serviceWorker.addEventListener('message', event => {
+    if(event.data?.type === 'BACKGROUND_SYNC') console.log('Background sync event received');
+  });
+}
+
+markStandalone();
+handlePWAShortcuts();
+
+
+// V13 standalone cleanup
+window.addEventListener('load',()=>{
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+  if(standalone){
+    document.body.classList.add('standalone');
+  }
+});
