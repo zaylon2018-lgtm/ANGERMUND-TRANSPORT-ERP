@@ -960,3 +960,172 @@ loadAll=async function(){
   await oldLoadAllV17();
   if(document.getElementById('peoplehub')?.classList.contains('active')) renderPeopleHub();
 };
+
+
+// V18: device time, proper roles, WhatsApp slip intake
+const V18_TIME_FIELDS = ['trips','diesel','payroll','workers','payments','invoices'];
+for(const t of V18_TIME_FIELDS){
+  if(tables[t] && !tables[t].fields.includes('device_time')) tables[t].fields.splice(1,0,'device_time');
+}
+if(tables.users && !dropdowns.role) dropdowns.role='role';
+
+function localDeviceTime(){
+  const d=new Date();
+  const pad=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// Improve time display on all tables
+const oldFmtV18 = typeof fmt === 'function' ? fmt : null;
+fmt = function(t,f,r){
+  if(f==='device_time') return r[f] || '';
+  if(f==='created_at') return r[f] ? new Date(r[f]).toLocaleString() : '';
+  return oldFmtV18 ? oldFmtV18(t,f,r) : (r[f]??'');
+};
+
+// Override modal to auto-add current device time and lowercase roles
+const oldOpenModalV18 = openModal;
+openModal = function(t,row={}){
+  if(!row.id && tables[t]?.fields?.includes('device_time') && !row.device_time) row.device_time=localDeviceTime();
+  oldOpenModalV18(t,row);
+  if(t==='users'){
+    const roleEl=modalForm.elements['role'];
+    if(roleEl && roleEl.tagName==='SELECT'){
+      const needed=['owner','admin','manager','dispatcher','accountant','office','driver','mechanic','labourer'];
+      const have=[...roleEl.options].map(o=>o.value||o.text);
+      needed.forEach(r=>{if(!have.includes(r)){const o=document.createElement('option');o.value=r;o.textContent=r;roleEl.appendChild(o);}});
+    }
+  }
+};
+
+// Ensure submitted role is lowercase and device time is present
+const oldValueFromModalFieldV18 = typeof valueFromModalField === 'function' ? valueFromModalField : null;
+valueFromModalField = function(form,f){
+  let v = oldValueFromModalFieldV18 ? oldValueFromModalFieldV18(form,f) : (form.elements[f]?.value || '');
+  if(f==='role') v=String(v||'').toLowerCase();
+  if(f==='device_time' && !v) v=localDeviceTime();
+  return v;
+};
+
+function renderWhatsAppSetup(){
+  const sec=document.getElementById('whatsapp'); if(!sec)return;
+  const old=sec.innerHTML;
+  if(sec.querySelector('#waSetup')) return;
+  const div=document.createElement('div');
+  div.id='waSetup';
+  div.className='card';
+  div.innerHTML=`<h2>WhatsApp Slip / Receipt Intake</h2>
+  <p>Drivers can send slips/photos to WhatsApp. Use WhatsApp Business, Twilio, Make.com or Zapier to POST the media to your ERP webhook.</p>
+  <pre>/api/whatsapp/inbound?token=YOUR_TOKEN</pre>
+  <p class="help">Railway variable needed: WHATSAPP_WEBHOOK_TOKEN. Payload fields: media_url, driver, truck, doc_type, text. Uploaded items go to Driver Hub upload queue, then AI processes them.</p>
+  <button class="btn" onclick="copyWebhookInfo()">Copy Setup Text</button>`;
+  sec.prepend(div);
+}
+function copyWebhookInfo(){
+  const txt=`WhatsApp to ERP setup:
+POST to: ${location.origin}/api/whatsapp/inbound?token=YOUR_TOKEN
+Railway variable: WHATSAPP_WEBHOOK_TOKEN
+Fields: media_url, driver, truck, doc_type, text
+Use Make.com, Zapier, Twilio WhatsApp or Meta WhatsApp Cloud API.`;
+  navigator.clipboard?.writeText(txt);
+  alert('Setup copied');
+}
+
+const oldShowV18=show;
+show=function(id,btn){
+  oldShowV18(id,btn);
+  if(id==='whatsapp') setTimeout(renderWhatsAppSetup,100);
+};
+
+
+// V19: all alerts linked + proper dashboard graphs
+let lastDashboardData=null;
+
+function drawGraph(canvasId, dataObj, type='bar'){
+  const c=document.getElementById(canvasId); if(!c)return;
+  const ctx=c.getContext('2d');
+  const rect=c.getBoundingClientRect();
+  const w=c.width=Math.max(600, rect.width*2);
+  const h=c.height=480;
+  ctx.clearRect(0,0,w,h);
+  ctx.fillStyle='rgba(0,0,0,.25)'; ctx.fillRect(0,0,w,h);
+  const labels=Object.keys(dataObj||{}).slice(0,10);
+  const vals=labels.map(k=>Number(dataObj[k]||0));
+  const max=Math.max(...vals.map(v=>Math.abs(v)),1);
+  ctx.strokeStyle='rgba(255,255,255,.15)';
+  ctx.lineWidth=1;
+  for(let i=0;i<5;i++){let y=40+i*(h-90)/4;ctx.beginPath();ctx.moveTo(25,y);ctx.lineTo(w-20,y);ctx.stroke();}
+  if(type==='line'){
+    ctx.strokeStyle='#45ff67';ctx.lineWidth=5;ctx.beginPath();
+    vals.forEach((v,i)=>{let x=40+i*((w-80)/Math.max(vals.length-1,1));let y=h-55-(v/max)*(h-110); if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});
+    ctx.stroke();
+  } else {
+    const bw=(w-80)/(Math.max(vals.length,1)*1.5);
+    vals.forEach((v,i)=>{
+      const x=45+i*bw*1.5;
+      const bh=(Math.abs(v)/max)*(h-120);
+      ctx.fillStyle=v<0?'#ff4e4e':'#2e8cff';
+      ctx.fillRect(x,h-55-bh,bw,bh);
+      ctx.fillStyle='white';ctx.font='22px Arial';
+      ctx.fillText(String(labels[i]).slice(0,10),x,h-18);
+      ctx.font='20px Arial';
+      ctx.fillText(Number(v).toLocaleString(),x, h-62-bh);
+    });
+  }
+}
+
+function renderBetterAlerts(alertRows){
+  const box=document.getElementById('alerts');
+  if(!box)return;
+  if(!alertRows || !alertRows.length){box.innerHTML='<p>No urgent alerts</p>';return;}
+  box.className='alertList';
+  box.innerHTML=alertRows.map(a=>`<div class="alertItem ${a.severity||''}"><b>${a.severity||'Info'}</b> — ${a.message||''}</div>`).join('');
+}
+
+function ensureGraphDashboard(){
+  const dash=document.getElementById('dashboard'); if(!dash)return;
+  if(!document.getElementById('v19GraphGrid')){
+    const div=document.createElement('div');
+    div.id='v19GraphGrid';
+    div.className='graphGrid';
+    div.innerHTML=`
+      <div class="card graphCard"><h2>Revenue by Route</h2><canvas class="graphCanvas" id="gRevenueRoute"></canvas></div>
+      <div class="card graphCard"><h2>Profit by Driver</h2><canvas class="graphCanvas" id="gProfitDriver"></canvas></div>
+      <div class="card graphCard"><h2>Diesel by Truck</h2><canvas class="graphCanvas" id="gDieselTruck"></canvas></div>
+      <div class="card graphCard"><h2>Expenses Breakdown</h2><canvas class="graphCanvas" id="gExpenses"></canvas></div>
+      <div class="card graphCard"><h2>Invoice Status</h2><canvas class="graphCanvas" id="gInvoiceStatus"></canvas></div>
+      <div class="card graphCard"><h2>Receivables by Client</h2><canvas class="graphCanvas" id="gReceivables"></canvas></div>
+    `;
+    dash.appendChild(div);
+  }
+}
+
+function drawBetterGraphs(d){
+  if(!d || !d.charts)return;
+  ensureGraphDashboard();
+  setTimeout(()=>{
+    drawGraph('gRevenueRoute',d.charts.revenueByRoute,'bar');
+    drawGraph('gProfitDriver',d.charts.profitByDriver,'bar');
+    drawGraph('gDieselTruck',d.charts.dieselByTruck,'bar');
+    drawGraph('gExpenses',d.charts.expensesBreakdown,'bar');
+    drawGraph('gInvoiceStatus',d.charts.invoiceStatus,'bar');
+    drawGraph('gReceivables',d.charts.receivablesByClient,'bar');
+  },150);
+}
+
+const oldRenderDashV19 = renderDash;
+renderDash = function(d){
+  lastDashboardData=d;
+  oldRenderDashV19(d);
+  renderBetterAlerts(d.alerts);
+  ensureGraphDashboard();
+  drawBetterGraphs(d);
+};
+
+const oldShowV19 = show;
+show = function(id,btn){
+  oldShowV19(id,btn);
+  if(id==='dashboard' && lastDashboardData){
+    setTimeout(()=>{renderBetterAlerts(lastDashboardData.alerts); drawBetterGraphs(lastDashboardData);},200);
+  }
+};

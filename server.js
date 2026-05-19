@@ -122,19 +122,33 @@ create table if not exists invoices(id serial primary key,date date default curr
 
 const seed=[['route','Windhoek - Cape Town'],['route','Windhoek - Gauteng'],['route','Walvis Bay - Cape Town'],['client','NBL'],['client','RCC'],['supplier','Engen'],['supplier','Shell'],['status','Active'],['status','Open'],['status','Closed'],['status','Completed'],['status','In Progress'],['status','Valid'],['role','Driver'],['role','Labourer'],['role','Operator'],['permit_type','Cross Border Permit'],['permit_type','Roadworthy'],['permit_type','License Disk'],['permit_type','Insurance'],['border_post','Ariamsvlei'],['border_post','Noordoewer'],['border_post','Trans-Kalahari'],['priority','Low'],['priority','Normal'],['priority','High'],['priority','Urgent']];
 async function init(){await pool.query(schema);
+
+await pool.query("alter table trips add column if not exists device_time text");
+await pool.query("alter table diesel add column if not exists device_time text");
+await pool.query("alter table payroll add column if not exists device_time text");
+await pool.query("alter table workers add column if not exists device_time text");
+await pool.query("alter table payments add column if not exists device_time text");
+await pool.query("alter table invoices add column if not exists device_time text");
+await pool.query("alter table upload_queue add column if not exists device_time text");
+
 await pool.query("alter table diesel add column if not exists price_per_litre numeric default 0");
 await pool.query("alter table diesel add column if not exists station text");
 await pool.query("alter table diesel add column if not exists pump text");
 await pool.query("alter table diesel add column if not exists attendant text");
 await pool.query("alter table diesel add column if not exists manual_fields text");
-let email=process.env.ADMIN_EMAIL||'admin@angermundtransport.com',pass=process.env.ADMIN_PASSWORD||'admin123';let r=await pool.query('select id from users where email=$1',[email]);if(!r.rowCount)await pool.query('insert into users(email,password_hash,name,role) values($1,$2,$3,$4)',[email,await bcrypt.hash(pass,10),'Admin','admin']);for(const [t,v] of seed)await pool.query('insert into masters(type,value) values($1,$2) on conflict do nothing',[t,v]);}
+let email=process.env.ADMIN_EMAIL||'admin@angermundtransport.com',pass=process.env.ADMIN_PASSWORD||'admin123';let r=await pool.query('select id from users where email=$1',[email]);if(!r.rowCount)await pool.query('insert into users(email,password_hash,name,role) values($1,$2,$3,$4)',[email,await bcrypt.hash(pass,10),'Admin','admin']);for(const [t,v] of seed)await pool.query('insert into masters(type,value) values($1,$2) on conflict do nothing',[t,v]);
+
+for(const role of ['owner','admin','manager','dispatcher','accountant','office','driver','mechanic','labourer']){
+  await pool.query('insert into masters(type,value) values($1,$2) on conflict do nothing',['role',role]);
+}
+}
 init().catch(console.error);
 
 function auth(req,res,next){try{req.user=jwt.verify((req.headers.authorization||'').replace('Bearer ',''),SECRET);next()}catch{res.status(401).json({error:'Not logged in'})}}
 function admin(req,res,next){if(!['admin','manager'].includes(req.user.role))return res.status(403).json({error:'No permission'});next()}
 
 function roleName(req){ return String(req.user?.role || '').toLowerCase(); }
-function isOffice(req){ return ['owner','admin','manager','dispatcher','accountant'].includes(roleName(req)); }
+function isOffice(req){ return ['owner','admin','manager','dispatcher','accountant','office'].includes(roleName(req)); }
 function isDriver(req){ return roleName(req)==='driver'; }
 function canAccessTable(req, table){
   if(isOffice(req)) return true;
@@ -167,33 +181,139 @@ app.post('/api/auth/login',async(req,res)=>{let{email,password}=req.body;let r=a
 app.get('/api/me',auth,(req,res)=>res.json({user:req.user}));
 app.get('/api/options',auth,async(req,res)=>{let rows=(await pool.query('select type,value from masters order by type,value')).rows,out={};rows.forEach(r=>(out[r.type] ||= []).push(r.value));res.json(out)});
 
+
 app.get('/api/dashboard',auth,async(req,res)=>{
   if(String(req.user.role||'').toLowerCase()==='driver')return res.status(403).json({error:'Driver cannot access office dashboard'});
-  let trips=(await pool.query('select * from trips order by created_at desc')).rows;
-  let invoices=(await pool.query('select * from invoices order by created_at desc')).rows;
-  let diesel=(await pool.query('select coalesce(sum(amount),0) v from diesel')).rows[0].v;
-  let payments=(await pool.query('select coalesce(sum(amount),0) v from payments')).rows[0].v;
 
-  let tripRevenue=0, tripExpenses=Number(diesel), km=0;
+  const trips=(await pool.query('select * from trips order by created_at desc')).rows;
+  const invoices=(await pool.query('select * from invoices order by created_at desc')).rows;
+  const dieselRows=(await pool.query('select * from diesel order by created_at desc')).rows;
+  const drivers=(await pool.query('select * from drivers order by created_at desc')).rows;
+  const trucks=(await pool.query('select * from trucks order by created_at desc')).rows;
+  const permits=(await pool.query('select * from permits order by created_at desc')).rows;
+  const maintenance=(await pool.query('select * from maintenance order by created_at desc')).rows;
+  const tyres=(await pool.query('select * from tyres order by created_at desc')).rows;
+  const payroll=(await pool.query('select * from payroll order by created_at desc')).rows;
+  const fines=(await pool.query('select * from fines_damages order by created_at desc')).rows;
+
+  const dieselTotal=dieselRows.reduce((a,d)=>a+Number(d.amount||0),0);
+  let tripRevenue=0, tripExpenses=Number(dieselTotal), km=0;
   trips.forEach(t=>{let c=tripCalc(t);tripRevenue+=c.income;tripExpenses+=c.cost;km+=Number(t.km||0)});
+  const invoiceRevenue=invoices.reduce((a,i)=>a+Number(i.amount||0),0);
+  const invoicePaid=invoices.reduce((a,i)=>a+Number(i.paid||0),0);
+  const receivables=invoiceRevenue-invoicePaid;
+  const payments=(await pool.query('select coalesce(sum(amount),0) v from payments')).rows[0].v;
+  const revenue=invoiceRevenue>0 ? invoiceRevenue : tripRevenue;
+  const expenses=tripExpenses;
 
-  let invoiceRevenue=invoices.reduce((a,i)=>a+Number(i.amount||0),0);
-  let invoicePaid=invoices.reduce((a,i)=>a+Number(i.paid||0),0);
-  let receivables=invoiceRevenue-invoicePaid;
+  const alerts=[];
+  const today=new Date();
+  function daysLeft(dateVal){
+    if(!dateVal) return null;
+    const d=new Date(dateVal);
+    if(isNaN(d)) return null;
+    return Math.ceil((d-today)/(1000*60*60*24));
+  }
+  function addExpiry(module,name,field,dateVal){
+    const days=daysLeft(dateVal);
+    if(days===null) return;
+    if(days<=45){
+      alerts.push({
+        type:module,
+        severity:days<0?'Expired':(days<=7?'Urgent':'Warning'),
+        message:`${module}: ${name} ${field} ${days<0?'expired':'expires'} ${Math.abs(days)} day(s) ${days<0?'ago':'from now'}`,
+        due_date:dateVal
+      });
+    }
+  }
 
-  // Main dashboard income should show invoices when invoices exist, otherwise trip income.
-  let revenue=invoiceRevenue>0 ? invoiceRevenue : tripRevenue;
-  let expenses=tripExpenses;
-  let alerts=(await pool.query(`
-select 'Permit' type, item||' - '||owner||' expires on '||expiry_date message from permits where expiry_date <= current_date + interval '45 days'
-union all select 'Reminder', title||' due '||due_date from reminders where status<>'Closed' and due_date <= current_date + interval '14 days'
-union all select 'Invoice', invoice_no||' unpaid for '||client from invoices where coalesce(amount,0)>coalesce(paid,0)
-limit 40`)).rows;
-  let gps=(await pool.query('select * from gps_points order by created_at desc limit 10')).rows;
-  res.json({metrics:{revenue,expenses,profit:revenue-expenses,km,diesel:Number(diesel),invoiceRevenue,invoicePaid,receivables,payments:Number(payments)},recent:trips.slice(0,8),invoices:invoices.slice(0,8),alerts,gps});
+  drivers.forEach(d=>{
+    const name=d.name||d.email||'Driver';
+    addExpiry('Driver',name,'license',d.license_expiry);
+    addExpiry('Driver',name,'PDP',d.pdp_expiry);
+    addExpiry('Driver',name,'passport',d.passport_expiry);
+  });
+  trucks.forEach(t=>{
+    const name=t.truck_no||t.make_model||'Truck';
+    addExpiry('Truck',name,'license disk',t.license_expiry);
+    addExpiry('Truck',name,'roadworthy',t.roadworthy_expiry);
+    addExpiry('Truck',name,'insurance',t.insurance_expiry);
+    if(Number(t.next_service_km||0)>0 && Number(t.current_km||0)>=Number(t.next_service_km||0)-1000){
+      alerts.push({type:'Truck',severity:'Warning',message:`Truck ${name} service due soon. Current KM ${t.current_km}, next service ${t.next_service_km}`});
+    }
+  });
+  permits.forEach(p=>addExpiry('Permit',`${p.item||''} ${p.owner||''}`.trim()||'Permit','expiry',p.expiry_date));
+  invoices.forEach(i=>{
+    if(Number(i.amount||0)>Number(i.paid||0)){
+      alerts.push({type:'Invoice',severity:'Info',message:`Invoice ${i.invoice_no||i.id} unpaid/part-paid for ${i.client||'client'}: balance N$ ${(Number(i.amount||0)-Number(i.paid||0)).toFixed(2)}`});
+    }
+  });
+  maintenance.forEach(m=>{
+    if(String(m.status||'').toLowerCase()!=='closed' && String(m.status||'').toLowerCase()!=='completed'){
+      alerts.push({type:'Maintenance',severity:'Info',message:`Open maintenance: ${m.truck||''} ${m.issue||''}`});
+    }
+  });
+  tyres.forEach(t=>{
+    if(['worn','replace','damaged'].includes(String(t.status||'').toLowerCase())){
+      alerts.push({type:'Tyre',severity:'Warning',message:`Tyre attention: ${t.truck||''} ${t.position||''} ${t.status||''}`});
+    }
+  });
+  fines.forEach(f=>{
+    if(String(f.status||'').toLowerCase()!=='closed' && Number(f.amount||0)>0){
+      alerts.push({type:'Fine/Damage',severity:'Warning',message:`Open fine/damage: ${f.driver||f.truck||''} N$ ${Number(f.amount||0).toFixed(2)} ${f.description||''}`});
+    }
+  });
+  const reminderRows=(await pool.query("select * from reminders where status <> 'Closed' and due_date <= current_date + interval '30 days' order by due_date asc limit 50")).rows;
+  reminderRows.forEach(r=>alerts.push({type:'Reminder',severity:r.priority||'Normal',message:`Reminder: ${r.title||''} due ${r.due_date||''}`}));
+
+  const gps=(await pool.query('select * from gps_points order by created_at desc limit 10')).rows;
+
+  function group(rows,key,fn){
+    const o={}; rows.forEach(r=>{const k=r[key]||'Unknown'; o[k]=(o[k]||0)+fn(r);}); return o;
+  }
+  const charts={
+    revenueByRoute: group(trips,'route',t=>Number(t.km||0)*Number(t.rate_km||0)),
+    profitByDriver: group(trips,'driver',t=>tripCalc(t).profit),
+    kmByTruck: group(trips,'truck',t=>Number(t.km||0)),
+    dieselByTruck: group(dieselRows,'truck',d=>Number(d.amount||0)),
+    dieselLitresByTruck: group(dieselRows,'truck',d=>Number(d.litres||0)),
+    invoiceStatus: group(invoices,'status',i=>1),
+    expensesBreakdown:{
+      diesel:dieselTotal,
+      payroll:payroll.reduce((a,p)=>a+Number(p.basic_salary||0)+Number(p.advance||0)-Number(p.deductions||0),0),
+      maintenance:maintenance.reduce((a,m)=>a+Number(m.cost||0),0),
+      tyres:tyres.reduce((a,t)=>a+Number(t.cost||0),0),
+      fines:fines.reduce((a,f)=>a+Number(f.amount||0),0)
+    },
+    monthlyRevenue: group(trips,'date',t=>Number(t.km||0)*Number(t.rate_km||0)),
+    receivablesByClient: group(invoices,'client',i=>Number(i.amount||0)-Number(i.paid||0))
+  };
+
+  res.json({
+    metrics:{revenue,expenses,profit:revenue-expenses,km,diesel:Number(dieselTotal),invoiceRevenue,invoicePaid,receivables,payments:Number(payments)},
+    recent:trips.slice(0,8),
+    invoices:invoices.slice(0,8),
+    alerts:alerts.slice(0,80),
+    gps,
+    charts
+  });
 });
 
 app.get('/api/:table',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).json({error:'Unknown table'});if(!canAccessTable(req,t) && t!=='users')return res.status(403).json({error:'No permission for this module'});let rows=(await pool.query(`select ${t==='users'?'id,email,name,role,created_at':'*'} from ${t} order by created_at desc limit 1000`)).rows;res.json({rows})});
+
+app.put('/api/users/:id',auth,admin,async(req,res)=>{
+  const {email,name,role,password}=req.body||{};
+  const fields=[], vals=[];
+  if(email!==undefined){vals.push(email);fields.push('email=$'+vals.length);}
+  if(name!==undefined){vals.push(name);fields.push('name=$'+vals.length);}
+  if(role!==undefined){vals.push(String(role).toLowerCase());fields.push('role=$'+vals.length);}
+  if(password){vals.push(await bcrypt.hash(password,10));fields.push('password_hash=$'+vals.length);}
+  if(!fields.length)return res.status(400).json({error:'No user fields'});
+  vals.push(req.params.id);
+  const r=await pool.query(`update users set ${fields.join(',')} where id=$${vals.length} returning id,email,name,role,created_at`,vals);
+  res.json({row:r.rows[0]});
+});
+
 app.post('/api/users',auth,admin,async(req,res)=>{let{email,password,name,role}=req.body;let r=await pool.query('insert into users(email,password_hash,name,role) values($1,$2,$3,$4) returning id,email,name,role,created_at',[email,await bcrypt.hash(password||'password123',10),name,role||'driver']);res.json({row:r.rows[0]})});
 app.post('/api/gps',auth,async(req,res)=>{let{lat,lng,accuracy,driver,truck}=req.body;let r=await pool.query('insert into gps_points(email,driver,truck,lat,lng,accuracy) values($1,$2,$3,$4,$5,$6) returning *',[req.user.email,driver||req.user.name||req.user.email,truck||'',lat,lng,accuracy||0]);res.json({row:r.rows[0]})});
 app.post('/api/:table',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});if(!canAccessTable(req,t))return res.status(403).json({error:'No permission for this module'});let obj=req.body||{};if(t==='trips')obj.km=Number(obj.km||0)||Math.max(0,Number(obj.end_km||0)-Number(obj.start_km||0));let keys=Object.keys(obj).filter(k=>obj[k]!==''&&obj[k]!==undefined);if(!keys.length)return res.status(400).json({error:'No data'});let vals=keys.map(k=>obj[k]);let r=await pool.query(`insert into ${t}(${keys.join(',')}) values(${keys.map((_,i)=>'$'+(i+1)).join(',')}) returning *`,vals);res.json({row:r.rows[0]})});
@@ -764,6 +884,50 @@ app.get('/api/people/profile/:type/:name',auth,async(req,res)=>{
   const payrollTotal=payroll.reduce((a,p)=>a+Number(p.basic_salary||0)+Number(p.advance||0)-Number(p.deductions||0),0);
   const finesTotal=fines.reduce((a,f)=>a+Number(f.amount||0),0);
   res.json({name,type,summary:{trips:trips.length,km,revenue,dieselCost,payrollTotal,finesTotal,uploads:uploads.length},trips,diesel,payroll,workers,fines,gps,uploads});
+});
+
+
+app.post('/api/whatsapp/inbound',async(req,res)=>{
+  const token=req.query.token||req.headers['x-webhook-token']||'';
+  if(process.env.WHATSAPP_WEBHOOK_TOKEN && token!==process.env.WHATSAPP_WEBHOOK_TOKEN){
+    return res.status(401).json({error:'Bad webhook token'});
+  }
+  const b=req.body||{};
+  const driver=b.driver||b.from_name||b.profileName||b.name||b.From||b.from||'WhatsApp Driver';
+  const truck=b.truck||b.plate||'';
+  const docType=b.doc_type||b.type||'auto';
+  const mediaUrl=b.media_url||b.MediaUrl0||b.image||b.file_url||'';
+  const text=b.text||b.Body||b.message||'';
+  const deviceTime=b.device_time||new Date().toISOString();
+
+  let fileUrl=mediaUrl;
+  if(mediaUrl && mediaUrl.startsWith('http')){
+    try{
+      const resp=await fetch(mediaUrl);
+      if(resp.ok){
+        const arr=Buffer.from(await resp.arrayBuffer());
+        const ext=(resp.headers.get('content-type')||'image/jpeg').includes('pdf')?'.pdf':'.jpg';
+        const fn='wa_'+Date.now()+ext;
+        fs.writeFileSync(path.join(__dirname,'uploads',fn),arr);
+        fileUrl='/uploads/'+fn;
+      }
+    }catch(e){/* keep mediaUrl */}
+  }
+
+  const q=await pool.query(
+    "insert into upload_queue(driver,truck,doc_type,file_url,status,device_time,result_json) values($1,$2,$3,$4,'Queued',$5,$6) returning *",
+    [driver,truck,docType,fileUrl,deviceTime,{text,source:'whatsapp'}]
+  );
+  await logIntegration('whatsapp','inbound','queued','WhatsApp document queued',{driver,truck,docType,fileUrl});
+  res.json({ok:true,queued:q.rows[0]});
+});
+
+app.get('/api/whatsapp/setup',auth,admin,(req,res)=>{
+  res.json({
+    webhook_url:'/api/whatsapp/inbound?token=YOUR_TOKEN',
+    railway_variable:'WHATSAPP_WEBHOOK_TOKEN',
+    use:'Connect WhatsApp Business, Twilio, Make.com or Zapier to POST media_url, driver, truck, doc_type and text to this endpoint.'
+  });
 });
 
 app.get('/api/export/:table/:format',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).send('Unknown');let rows=(await pool.query(`select * from ${t} order by created_at desc`)).rows;let f=req.params.format;if(f==='json')return res.json(rows);if(f==='xlsx'){let wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),req.params.table);res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.xlsx`);return res.send(XLSX.write(wb,{type:'buffer',bookType:'xlsx'}))}if(f==='csv'){res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.csv`);let h=Object.keys(rows[0]||{});return res.send([h.join(','),...rows.map(r=>h.map(k=>JSON.stringify(r[k]??'')).join(','))].join('\\n'))}let doc=new PDFDocument({margin:30});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.pdf`);doc.pipe(res);doc.fontSize(18).text('Angermund Transport - '+req.params.table.toUpperCase());rows.slice(0,200).forEach((r,i)=>doc.fontSize(8).text((i+1)+'. '+JSON.stringify(r)));doc.end()});
