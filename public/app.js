@@ -641,3 +641,322 @@ async function uploadExcel(){
 const oldRenderDash14=renderDash; renderDash=function(d){oldRenderDash14(d); setTimeout(addDashboardCharts,100);}
 const oldShow14=show; show=function(id,btn){oldShow14(id,btn); if(id==='imports')renderImports(); if(id==='dashboard')setTimeout(addDashboardCharts,100);}
 const oldLoadAll14=loadAll; loadAll=async function(){await oldLoadAll14(); setTimeout(()=>{addDashboardCharts();drawDashboardCharts();},250);}
+
+
+// V15: dashboard invoices + payment status + edit fix
+function paymentStatusSelect(r){
+  return `<select onchange="quickInvoiceStatus(${r.id},this.value)">
+    ${['Unpaid','Part Paid','Paid','Overdue','Cancelled'].map(s=>`<option ${String(r.status||'')===s?'selected':''}>${s}</option>`).join('')}
+  </select>`;
+}
+async function quickInvoiceStatus(id,status){
+  try{
+    await api('/invoices/'+id,{method:'PUT',body:{status}});
+    await loadAll();
+  }catch(e){alert(e.message)}
+}
+async function addInvoicePayment(id){
+  const amount=prompt('Payment amount received?');
+  if(!amount)return;
+  const method=prompt('Payment method? EFT / Cash / Card','EFT')||'EFT';
+  const reference=prompt('Reference / receipt no?','')||'';
+  try{
+    await api('/invoices/'+id+'/payment',{method:'POST',body:{amount,method,reference,status:'Part Paid'}});
+    await loadAll();
+    alert('Payment added');
+  }catch(e){alert(e.message)}
+}
+
+// safer action buttons
+act = function(t,r){
+  let extra='';
+  if(t==='invoices') extra=` <button class="btn green" onclick="addInvoicePayment(${r.id})">Payment</button>`;
+  return `<button class="btn gray" onclick='editRow("${t}",${JSON.stringify(r).replace(/'/g,"&#39;")})'>Edit</button>${extra} <button class="btn red" onclick="delRow('${t}',${r.id})">Del</button>`;
+};
+
+// invoice status dropdown in table
+const oldFmtV15 = fmt;
+fmt = function(t,f,r){
+  if(t==='invoices' && f==='status') return paymentStatusSelect(r);
+  return oldFmtV15(t,f,r);
+};
+
+// dashboard must show invoices too
+const oldRenderDashV15 = renderDash;
+renderDash = function(d){
+  oldRenderDashV15(d);
+  if(!document.getElementById('invoiceMetricRow')){
+    const dash=document.getElementById('dashboard');
+    const row=document.createElement('div');
+    row.id='invoiceMetricRow';
+    row.className='metrics';
+    row.innerHTML=`<div class="card metric"><small>INVOICE TOTAL</small><h2>${money(d.metrics.invoiceRevenue||0)}</h2></div>
+    <div class="card metric"><small>INVOICE PAID</small><h2>${money(d.metrics.invoicePaid||0)}</h2></div>
+    <div class="card metric"><small>RECEIVABLES</small><h2>${money(d.metrics.receivables||0)}</h2></div>
+    <div class="card metric"><small>PAYMENTS RECORDED</small><h2>${money(d.metrics.payments||0)}</h2></div>`;
+    dash.insertBefore(row,dash.children[1]||null);
+  } else {
+    invoiceMetricRow.innerHTML=`<div class="card metric"><small>INVOICE TOTAL</small><h2>${money(d.metrics.invoiceRevenue||0)}</h2></div>
+    <div class="card metric"><small>INVOICE PAID</small><h2>${money(d.metrics.invoicePaid||0)}</h2></div>
+    <div class="card metric"><small>RECEIVABLES</small><h2>${money(d.metrics.receivables||0)}</h2></div>
+    <div class="card metric"><small>PAYMENTS RECORDED</small><h2>${money(d.metrics.payments||0)}</h2></div>`;
+  }
+};
+
+
+// V16: Split smart AI into each module + Bank Windhoek Pay buttons
+const BANK_WINDHOEK_URL = "https://ibank.bankwindhoek.com.na/retail/";
+
+function openBankWindhoek(context="", amount="", reference=""){
+  const msg = [
+    "Opening Bank Windhoek Internet Banking.",
+    context ? "Payment: "+context : "",
+    amount ? "Amount: N$ "+amount : "",
+    reference ? "Reference: "+reference : "",
+    "Use your banking app/site to complete the payment securely."
+  ].filter(Boolean).join("\n");
+  alert(msg);
+  window.open(BANK_WINDHOEK_URL, "_blank", "noopener,noreferrer");
+}
+
+function payButton(label, context, amountExpr, refExpr){
+  return `<button class="btn payBtn" onclick="openBankWindhoek('${String(context||'').replace(/'/g,'')}', '${String(amountExpr||'').replace(/'/g,'')}', '${String(refExpr||'').replace(/'/g,'')}')">💳 Pay</button>`;
+}
+
+function inlineScanner(type,label){
+  return `<div class="aiInlineBox"><h3>🤖 ${label}</h3>
+    <input id="inlineFile_${type}" type="file" accept="image/*,.pdf">
+    <button class="btn orange" onclick="scanInlineDoc('${type}')">Scan ${label}</button>
+    <pre id="inlineOut_${type}" class="help"></pre>
+  </div>`;
+}
+
+async function scanInlineDoc(type){
+  const inp=document.getElementById('inlineFile_'+type);
+  const out=document.getElementById('inlineOut_'+type);
+  if(!inp || !inp.files[0]) return alert('Choose file first');
+  const fd=new FormData(); fd.append('file', inp.files[0]);
+  out.innerText='Uploading and scanning...';
+  const r=await fetch('/api/ai/scan/'+type,{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
+  const j=await r.json();
+  out.innerText=JSON.stringify(j,null,2);
+  if(j.scan_status==='partial_auto') alert('AI read the document. Check missing fields only.');
+  else alert('Manual check required or AI quota/key issue.');
+  await loadAll();
+}
+
+function attachModuleAI(){
+  const map = {
+    diesel: ['diesel','Diesel Slip AI Scanner'],
+    invoices: ['invoice','Invoice Scanner'],
+    permits: ['permit','Permit / License Scanner'],
+    tyres: ['tyre','Tyre Invoice Scanner'],
+    workshop: ['workshop','Workshop / Damage Photo AI'],
+    border: ['border','Border Document Scanner'],
+    trips: ['pod','POD / Delivery Note Scanner'],
+    maintenance: ['workshop','Maintenance Photo AI']
+  };
+  for(const [page,[type,label]] of Object.entries(map)){
+    const sec=document.getElementById(page);
+    if(sec && !sec.querySelector('.aiInlineBox')){
+      const box=document.createElement('div');
+      box.innerHTML=inlineScanner(type,label);
+      const card=sec.querySelector('.card') || sec.firstElementChild;
+      if(card) sec.insertBefore(box, card);
+      else sec.appendChild(box);
+    }
+  }
+}
+
+function addPayButtonsToPages(){
+  // payroll
+  const payroll=document.getElementById('payroll');
+  if(payroll && !payroll.querySelector('.payPayroll')){
+    const div=document.createElement('div');
+    div.className='card payPayroll';
+    div.innerHTML='<h2>Pay Payroll / Advances</h2><button class="btn payBtn" onclick="openBankWindhoek(\'Payroll / Advance payment\')">💳 Open Bank Windhoek Pay</button><p class="bankNote">This opens Bank Windhoek. Complete EFT/payment securely in the bank site.</p>';
+    payroll.prepend(div);
+  }
+  // workers
+  const workers=document.getElementById('workers');
+  if(workers && !workers.querySelector('.payWorkers')){
+    const div=document.createElement('div');
+    div.className='card payWorkers';
+    div.innerHTML='<h2>Pay Site Workers</h2><button class="btn payBtn" onclick="openBankWindhoek(\'Site worker payment\')">💳 Open Bank Windhoek Pay</button>';
+    workers.prepend(div);
+  }
+  // trips food money
+  const trips=document.getElementById('trips');
+  if(trips && !trips.querySelector('.payFood')){
+    const div=document.createElement('div');
+    div.className='card payFood';
+    div.innerHTML='<h2>Driver Food Money / Trip Advance</h2><button class="btn payBtn" onclick="openBankWindhoek(\'Driver food money / trip advance\')">💳 Pay Driver Food Money</button>';
+    trips.prepend(div);
+  }
+  // invoices
+  const invoices=document.getElementById('invoices');
+  if(invoices && !invoices.querySelector('.payInvoice')){
+    const div=document.createElement('div');
+    div.className='card payInvoice';
+    div.innerHTML='<h2>Supplier / Invoice Payments</h2><button class="btn payBtn" onclick="openBankWindhoek(\'Supplier or invoice payment\')">💳 Pay Invoice / Supplier</button>';
+    invoices.prepend(div);
+  }
+  // permits
+  const permits=document.getElementById('permits');
+  if(permits && !permits.querySelector('.payPermits')){
+    const div=document.createElement('div');
+    div.className='card payPermits';
+    div.innerHTML='<h2>Permit / License Payments</h2><button class="btn payBtn" onclick="openBankWindhoek(\'Permit or license payment\')">💳 Pay Permit</button>';
+    permits.prepend(div);
+  }
+  // maintenance/workshop
+  const maint=document.getElementById('maintenance');
+  if(maint && !maint.querySelector('.payMaintenance')){
+    const div=document.createElement('div');
+    div.className='card payMaintenance';
+    div.innerHTML='<h2>Workshop / Repairs Payments</h2><button class="btn payBtn" onclick="openBankWindhoek(\'Workshop or repair payment\')">💳 Pay Workshop</button>';
+    maint.prepend(div);
+  }
+}
+
+// Enhance invoice payment button to use Bank Windhoek too
+const oldAddInvoicePaymentV16 = typeof addInvoicePayment === 'function' ? addInvoicePayment : null;
+addInvoicePayment = async function(id){
+  const amount=prompt('Payment amount received / to pay?');
+  if(!amount)return;
+  const method=prompt('Payment method? EFT / Cash / Card','EFT')||'EFT';
+  const reference=prompt('Reference / receipt no?','')||'';
+  if(confirm('Open Bank Windhoek now to make payment?')) openBankWindhoek('Invoice payment', amount, reference);
+  try{
+    await api('/invoices/'+id+'/payment',{method:'POST',body:{amount,method,reference,status:'Part Paid'}});
+    await loadAll();
+    alert('Payment recorded');
+  }catch(e){alert(e.message)}
+};
+
+// Add smart AI explanation page that points to the split tabs
+const oldRenderSmartAIV16 = typeof renderSmartAI === 'function' ? renderSmartAI : null;
+renderSmartAI = function(){
+  const sec=document.getElementById('smartai');
+  if(!sec)return;
+  sec.innerHTML=`<div class="head"><h1>Smart AI Centre</h1></div>
+  <div class="card"><h2>AI features are now inside each module</h2>
+    <p>Diesel AI is in Diesel tab. Invoice AI is in Invoices. Permit AI is in Permits. Tyre AI is in Tyres. Workshop/Damage AI is in Workshop and Maintenance. POD AI is in Trips. Border AI is in Border Logs.</p>
+    <button class="btn" onclick="show('diesel')">Diesel AI</button>
+    <button class="btn" onclick="show('invoices')">Invoice AI</button>
+    <button class="btn" onclick="show('permits')">Permit AI</button>
+    <button class="btn" onclick="show('tyres')">Tyre AI</button>
+    <button class="btn" onclick="show('trips')">POD / Trip AI</button>
+  </div>
+  <div class="card"><h2>AI Assistant</h2><textarea id="aiQuestion" placeholder="Ask company question..."></textarea><br><button class="btn" onclick="askAI()">Ask AI</button><pre id="aiAnswer"></pre></div>`;
+};
+
+const oldShowV16 = show;
+show = function(id,btn){
+  oldShowV16(id,btn);
+  setTimeout(()=>{attachModuleAI();addPayButtonsToPages();},100);
+};
+
+const oldLoadAllV16 = loadAll;
+loadAll = async function(){
+  await oldLoadAllV16();
+  setTimeout(()=>{attachModuleAI();addPayButtonsToPages();},200);
+};
+
+setTimeout(()=>{attachModuleAI();addPayButtonsToPages();},1000);
+
+
+// V17 People Hub: per-driver / per-worker consolidated files
+let selectedPerson=null, selectedPersonType='driver', selectedProfileTab='summary';
+
+function getAllPeople(){
+  const names=new Set();
+  (cache.drivers||[]).forEach(d=>d.name&&names.add(d.name));
+  (cache.trips||[]).forEach(t=>t.driver&&names.add(t.driver));
+  (cache.diesel||[]).forEach(d=>d.driver&&names.add(d.driver));
+  (cache.payroll||[]).forEach(p=>p.employee&&names.add(p.employee));
+  (cache.workers||[]).forEach(w=>w.name&&names.add(w.name));
+  return [...names].sort();
+}
+
+function renderPeopleHub(){
+  const sec=document.getElementById('peoplehub'); if(!sec)return;
+  const people=getAllPeople();
+  if(!selectedPerson && people.length) selectedPerson=people[0];
+  sec.innerHTML=`<div class="head"><h1>People Hub</h1><button class="btn" onclick="openModal('drivers')">+ Add Driver</button></div>
+  <div class="profileGrid">
+    <div class="card personList">
+      <h2>Drivers / Workers</h2>
+      <input placeholder="Search person..." oninput="filterPeople(this.value)" style="width:100%;padding:10px;border-radius:10px">
+      <div id="peopleList">${people.map(n=>`<button class="personBtn ${n===selectedPerson?'active':''}" onclick="selectPerson('${String(n).replace(/'/g,'')}')">👤 ${n}</button>`).join('')}</div>
+    </div>
+    <div class="card" id="personProfile">Select a person</div>
+  </div>`;
+  if(selectedPerson) loadPersonProfile(selectedPerson);
+}
+
+function filterPeople(q){
+  q=String(q||'').toLowerCase();
+  document.querySelectorAll('.personBtn').forEach(b=>{b.style.display=b.innerText.toLowerCase().includes(q)?'block':'none'});
+}
+
+async function selectPerson(name){
+  selectedPerson=name;
+  selectedProfileTab='summary';
+  renderPeopleHub();
+}
+
+async function loadPersonProfile(name){
+  const box=document.getElementById('personProfile'); if(!box)return;
+  box.innerHTML='Loading...';
+  let d;
+  try{d=await api('/people/profile/driver/'+encodeURIComponent(name));}catch(e){box.innerHTML=e.message;return;}
+  window.currentPersonProfile=d;
+  drawPersonProfile(d);
+}
+
+function personProfileTabs(){
+  const tabs=['summary','trips','diesel','payroll','fines','gps','uploads'];
+  return `<div class="profileTabs">${tabs.map(t=>`<button class="${selectedProfileTab===t?'active':''}" onclick="selectedProfileTab='${t}';drawPersonProfile(window.currentPersonProfile)">${t.toUpperCase()}</button>`).join('')}</div>`;
+}
+
+function drawPersonProfile(d){
+  const box=document.getElementById('personProfile'); if(!box)return;
+  let html=`<h2>${d.name}</h2>${personProfileTabs()}`;
+  if(selectedProfileTab==='summary'){
+    html+=`<div class="profileSummary">
+      <div class="card metric"><small>TRIPS</small><h2>${d.summary.trips}</h2></div>
+      <div class="card metric"><small>TOTAL KM</small><h2>${Number(d.summary.km||0).toLocaleString()}</h2></div>
+      <div class="card metric"><small>REVENUE</small><h2>${money(d.summary.revenue)}</h2></div>
+      <div class="card metric"><small>DIESEL</small><h2>${money(d.summary.dieselCost)}</h2></div>
+      <div class="card metric"><small>PAYROLL</small><h2>${money(d.summary.payrollTotal)}</h2></div>
+      <div class="card metric"><small>FINES/DAMAGES</small><h2>${money(d.summary.finesTotal)}</h2></div>
+      <div class="card metric"><small>UPLOADS</small><h2>${d.summary.uploads}</h2></div>
+    </div>`;
+  }
+  if(selectedProfileTab==='trips') html+=profileTable(d.trips,['date','route','truck','km','rate_km','status']);
+  if(selectedProfileTab==='diesel') html+=profileTable(d.diesel,['date','truck','litres','amount','supplier','slip_no']);
+  if(selectedProfileTab==='payroll') html+=profileTable(d.payroll,['date','employee','basic_salary','advance','deductions','role']);
+  if(selectedProfileTab==='fines') html+=profileTable(d.fines,['date','type','description','amount','status']);
+  if(selectedProfileTab==='gps') html+=`<div class="tableWrap"><table><tr><th>Date</th><th>Truck</th><th>Map</th></tr>${(d.gps||[]).map(g=>`<tr><td>${g.created_at||''}</td><td>${g.truck||''}</td><td><a style="color:#5aa7ff" target="_blank" href="https://maps.google.com/?q=${g.lat},${g.lng}">Open Map</a></td></tr>`).join('')}</table></div>`;
+  if(selectedProfileTab==='uploads') html+=profileTable(d.uploads,['created_at','doc_type','status','scan_status','created_records']);
+  box.innerHTML=html;
+}
+
+function profileTable(rows,cols){
+  return `<div class="tableWrap"><table><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>${(rows||[]).map(r=>`<tr>${cols.map(c=>`<td>${c.includes('amount')||c.includes('salary')||c.includes('advance')||c.includes('deductions')?money(r[c]):(r[c]??'')}</td>`).join('')}</tr>`).join('')}</table></div>`;
+}
+
+// Keep old tabs, but People Hub reduces need to open each one.
+// Office can still open detailed modules when required.
+const oldShowV17=show;
+show=function(id,btn){
+  oldShowV17(id,btn);
+  if(id==='peoplehub')renderPeopleHub();
+};
+
+const oldLoadAllV17=loadAll;
+loadAll=async function(){
+  await oldLoadAllV17();
+  if(document.getElementById('peoplehub')?.classList.contains('active')) renderPeopleHub();
+};

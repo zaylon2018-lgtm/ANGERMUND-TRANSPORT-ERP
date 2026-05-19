@@ -166,12 +166,54 @@ async function postWebhook(event,payload){
 app.post('/api/auth/login',async(req,res)=>{let{email,password}=req.body;let r=await pool.query('select * from users where lower(email)=lower($1)',[email]);if(!r.rowCount||!await bcrypt.compare(password||'',r.rows[0].password_hash))return res.status(401).json({error:'Invalid login'});let user=safe(r.rows[0]);res.json({user,token:jwt.sign(user,SECRET,{expiresIn:'7d'})})});
 app.get('/api/me',auth,(req,res)=>res.json({user:req.user}));
 app.get('/api/options',auth,async(req,res)=>{let rows=(await pool.query('select type,value from masters order by type,value')).rows,out={};rows.forEach(r=>(out[r.type] ||= []).push(r.value));res.json(out)});
-app.get('/api/dashboard',auth,async(req,res)=>{if(String(req.user.role||'').toLowerCase()==='driver')return res.status(403).json({error:'Driver cannot access office dashboard'});let trips=(await pool.query('select * from trips order by created_at desc')).rows;let diesel=(await pool.query('select coalesce(sum(amount),0) v from diesel')).rows[0].v;let expenses=Number(diesel),revenue=0,km=0;trips.forEach(t=>{let c=tripCalc(t);revenue+=c.income;expenses+=c.cost;km+=Number(t.km||0)});let alerts=(await pool.query("select item||' - '||owner||' expires on '||expiry_date message from permits where expiry_date <= current_date + interval '45 days' union all select title||' due on '||due_date from reminders where status <> 'Closed' and due_date <= current_date + interval '14 days' limit 40")).rows;let gps=(await pool.query('select * from gps_points order by created_at desc limit 10')).rows;res.json({metrics:{revenue,expenses,profit:revenue-expenses,km,diesel:Number(diesel)},recent:trips.slice(0,8),alerts,gps})});
+
+app.get('/api/dashboard',auth,async(req,res)=>{
+  if(String(req.user.role||'').toLowerCase()==='driver')return res.status(403).json({error:'Driver cannot access office dashboard'});
+  let trips=(await pool.query('select * from trips order by created_at desc')).rows;
+  let invoices=(await pool.query('select * from invoices order by created_at desc')).rows;
+  let diesel=(await pool.query('select coalesce(sum(amount),0) v from diesel')).rows[0].v;
+  let payments=(await pool.query('select coalesce(sum(amount),0) v from payments')).rows[0].v;
+
+  let tripRevenue=0, tripExpenses=Number(diesel), km=0;
+  trips.forEach(t=>{let c=tripCalc(t);tripRevenue+=c.income;tripExpenses+=c.cost;km+=Number(t.km||0)});
+
+  let invoiceRevenue=invoices.reduce((a,i)=>a+Number(i.amount||0),0);
+  let invoicePaid=invoices.reduce((a,i)=>a+Number(i.paid||0),0);
+  let receivables=invoiceRevenue-invoicePaid;
+
+  // Main dashboard income should show invoices when invoices exist, otherwise trip income.
+  let revenue=invoiceRevenue>0 ? invoiceRevenue : tripRevenue;
+  let expenses=tripExpenses;
+  let alerts=(await pool.query(`
+select 'Permit' type, item||' - '||owner||' expires on '||expiry_date message from permits where expiry_date <= current_date + interval '45 days'
+union all select 'Reminder', title||' due '||due_date from reminders where status<>'Closed' and due_date <= current_date + interval '14 days'
+union all select 'Invoice', invoice_no||' unpaid for '||client from invoices where coalesce(amount,0)>coalesce(paid,0)
+limit 40`)).rows;
+  let gps=(await pool.query('select * from gps_points order by created_at desc limit 10')).rows;
+  res.json({metrics:{revenue,expenses,profit:revenue-expenses,km,diesel:Number(diesel),invoiceRevenue,invoicePaid,receivables,payments:Number(payments)},recent:trips.slice(0,8),invoices:invoices.slice(0,8),alerts,gps});
+});
+
 app.get('/api/:table',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).json({error:'Unknown table'});if(!canAccessTable(req,t) && t!=='users')return res.status(403).json({error:'No permission for this module'});let rows=(await pool.query(`select ${t==='users'?'id,email,name,role,created_at':'*'} from ${t} order by created_at desc limit 1000`)).rows;res.json({rows})});
 app.post('/api/users',auth,admin,async(req,res)=>{let{email,password,name,role}=req.body;let r=await pool.query('insert into users(email,password_hash,name,role) values($1,$2,$3,$4) returning id,email,name,role,created_at',[email,await bcrypt.hash(password||'password123',10),name,role||'driver']);res.json({row:r.rows[0]})});
 app.post('/api/gps',auth,async(req,res)=>{let{lat,lng,accuracy,driver,truck}=req.body;let r=await pool.query('insert into gps_points(email,driver,truck,lat,lng,accuracy) values($1,$2,$3,$4,$5,$6) returning *',[req.user.email,driver||req.user.name||req.user.email,truck||'',lat,lng,accuracy||0]);res.json({row:r.rows[0]})});
 app.post('/api/:table',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});if(!canAccessTable(req,t))return res.status(403).json({error:'No permission for this module'});let obj=req.body||{};if(t==='trips')obj.km=Number(obj.km||0)||Math.max(0,Number(obj.end_km||0)-Number(obj.start_km||0));let keys=Object.keys(obj).filter(k=>obj[k]!==''&&obj[k]!==undefined);if(!keys.length)return res.status(400).json({error:'No data'});let vals=keys.map(k=>obj[k]);let r=await pool.query(`insert into ${t}(${keys.join(',')}) values(${keys.map((_,i)=>'$'+(i+1)).join(',')}) returning *`,vals);res.json({row:r.rows[0]})});
-app.put('/api/:table/:id',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});if(!canAccessTable(req,t))return res.status(403).json({error:'No permission for this module'});let keys=Object.keys(req.body||{});let vals=keys.map(k=>req.body[k]);let r=await pool.query(`update ${t} set ${keys.map((k,i)=>k+'=$'+(i+1)).join(',')} where id=$${keys.length+1} returning *`,[...vals,req.params.id]);res.json({row:r.rows[0]})});
+
+app.put('/api/:table/:id',auth,async(req,res)=>{
+  let t=tableMap[req.params.table];
+  if(!t||t==='users')return res.status(404).json({error:'Unknown table'});
+  if(typeof canAccessTable==='function' && !canAccessTable(req,t))return res.status(403).json({error:'No permission for this module'});
+  const blocked=new Set(['id','created_at','updated_at','password_hash']);
+  let keys=Object.keys(req.body||{}).filter(k=>!blocked.has(k) && req.body[k]!==undefined);
+  if(!keys.length)return res.status(400).json({error:'No editable data'});
+  let vals=keys.map(k=>req.body[k]===''?null:req.body[k]);
+  try{
+    let r=await pool.query(`update ${t} set ${keys.map((k,i)=>k+'=$'+(i+1)).join(',')} where id=$${keys.length+1} returning *`,[...vals,req.params.id]);
+    res.json({row:r.rows[0]});
+  }catch(e){
+    res.status(400).json({error:e.message});
+  }
+});
+
 app.delete('/api/:table/:id',auth,admin,async(req,res)=>{let t=tableMap[req.params.table];if(!t||t==='users')return res.status(404).json({error:'Unknown table'});await pool.query(`delete from ${t} where id=$1`,[req.params.id]);res.json({ok:true})});
 
 
@@ -688,6 +730,40 @@ app.post('/api/import/excel/:module',auth,upload.single('file'),async(req,res)=>
     }
     res.json({module,inserted,skipped,errors});
   }catch(e){res.status(500).json({error:e.message});}
+});
+
+
+app.post('/api/invoices/:id/payment',auth,async(req,res)=>{
+  const amount=Number(req.body.amount||0);
+  const status=req.body.status||'Paid';
+  const method=req.body.method||'EFT';
+  const reference=req.body.reference||'';
+  const inv=(await pool.query('select * from invoices where id=$1',[req.params.id])).rows[0];
+  if(!inv)return res.status(404).json({error:'Invoice not found'});
+  const newPaid=Math.max(0,Number(inv.paid||0)+amount);
+  const finalStatus=status || (newPaid>=Number(inv.amount||0)?'Paid':'Part Paid');
+  await pool.query('update invoices set paid=$1,status=$2 where id=$3',[newPaid,finalStatus,req.params.id]);
+  await pool.query('insert into payments(party,method,reference,amount,status,notes) values($1,$2,$3,$4,$5,$6)',[inv.client,method,reference,amount,finalStatus,'Invoice '+(inv.invoice_no||inv.id)]);
+  res.json({ok:true,paid:newPaid,status:finalStatus});
+});
+
+
+app.get('/api/people/profile/:type/:name',auth,async(req,res)=>{
+  const name=decodeURIComponent(req.params.name||'');
+  const type=req.params.type;
+  const trips=(await pool.query("select * from trips where lower(driver)=lower($1) order by created_at desc",[name])).rows;
+  const diesel=(await pool.query("select * from diesel where lower(driver)=lower($1) order by created_at desc",[name])).rows;
+  const payroll=(await pool.query("select * from payroll where lower(employee)=lower($1) order by created_at desc",[name])).rows;
+  const workers=(await pool.query("select * from workers where lower(name)=lower($1) order by created_at desc",[name])).rows;
+  const fines=(await pool.query("select * from fines_damages where lower(driver)=lower($1) or lower(responsible_party)=lower($1) order by created_at desc",[name])).rows;
+  const gps=(await pool.query("select * from gps_points where lower(driver)=lower($1) order by created_at desc limit 50",[name])).rows;
+  const uploads=(await pool.query("select * from upload_queue where lower(driver)=lower($1) order by created_at desc",[name])).rows;
+  const km=trips.reduce((a,t)=>a+Number(t.km||0),0);
+  const revenue=trips.reduce((a,t)=>a+(Number(t.km||0)*Number(t.rate_km||0)),0);
+  const dieselCost=diesel.reduce((a,d)=>a+Number(d.amount||0),0);
+  const payrollTotal=payroll.reduce((a,p)=>a+Number(p.basic_salary||0)+Number(p.advance||0)-Number(p.deductions||0),0);
+  const finesTotal=fines.reduce((a,f)=>a+Number(f.amount||0),0);
+  res.json({name,type,summary:{trips:trips.length,km,revenue,dieselCost,payrollTotal,finesTotal,uploads:uploads.length},trips,diesel,payroll,workers,fines,gps,uploads});
 });
 
 app.get('/api/export/:table/:format',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).send('Unknown');let rows=(await pool.query(`select * from ${t} order by created_at desc`)).rows;let f=req.params.format;if(f==='json')return res.json(rows);if(f==='xlsx'){let wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),req.params.table);res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.xlsx`);return res.send(XLSX.write(wb,{type:'buffer',bookType:'xlsx'}))}if(f==='csv'){res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.csv`);let h=Object.keys(rows[0]||{});return res.send([h.join(','),...rows.map(r=>h.map(k=>JSON.stringify(r[k]??'')).join(','))].join('\\n'))}let doc=new PDFDocument({margin:30});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.pdf`);doc.pipe(res);doc.fontSize(18).text('Angermund Transport - '+req.params.table.toUpperCase());rows.slice(0,200).forEach((r,i)=>doc.fontSize(8).text((i+1)+'. '+JSON.stringify(r)));doc.end()});

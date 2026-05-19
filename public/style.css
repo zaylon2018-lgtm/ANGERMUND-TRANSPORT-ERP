@@ -147,3 +147,26 @@ canvas.statChart{width:100%;height:220px;background:#0003;border-radius:12px}
   .card{max-width:100%!important}
   .quickFab{right:12px!important}
 }
+
+/* V16 split AI features + pay buttons */
+.payBtn{background:#09a35a!important}
+.aiInlineBox{border:1px solid #2e8cff66;border-radius:14px;padding:14px;margin:12px 0;background:#07111faa}
+.aiInlineBox input,.aiInlineBox select{margin:6px 0}
+.bankNote{font-size:12px;color:#b8c4d6;margin-top:8px}
+@media(max-width:1000px){.payBtn{width:100%;margin-top:8px}.aiInlineBox .btn{width:100%;margin-top:8px}}
+
+/* V17 Driver/Worker profiles + cleaner tabs */
+.profileGrid{display:grid;grid-template-columns:320px 1fr;gap:14px}
+.personList{max-height:75vh;overflow:auto}
+.personBtn{display:block;width:100%;text-align:left;background:#101b2c;color:white;border:1px solid #ffffff22;border-radius:12px;padding:12px;margin:6px 0;cursor:pointer}
+.personBtn.active{background:#1768d8}
+.profileTabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.profileTabs button{background:#16243a;color:white;border:1px solid #ffffff22;border-radius:999px;padding:9px 13px}
+.profileTabs button.active{background:#2e8cff}
+.profileSummary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.compact-nav-group{border-top:1px solid #ffffff22;margin-top:8px;padding-top:8px}
+@media(max-width:1000px){
+  .profileGrid{grid-template-columns:1fr}
+  .profileSummary{grid-template-columns:1fr 1fr}
+  .personList{max-height:none}
+}
