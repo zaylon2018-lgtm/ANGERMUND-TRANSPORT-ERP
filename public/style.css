@@ -129,3 +129,21 @@ body.standalone .brandTitle{
     font-size:13px!important;
   }
 }
+
+/* V14 full-screen mobile + charts + excel import */
+.chartGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.chartBox{height:260px}
+canvas.statChart{width:100%;height:220px;background:#0003;border-radius:12px}
+.importBox{border:2px dashed #2e8cff;border-radius:18px;padding:18px;background:#07111fcc}
+@media(max-width:1000px){
+  html,body{width:100%!important;overflow-x:hidden!important}
+  .side{transform:translateX(-105%)!important;width:86vw!important;max-width:340px!important;z-index:9999!important}
+  .side.open{transform:translateX(0)!important}
+  .main{margin-left:0!important;width:100%!important;padding:10px 10px 92px!important}
+  .mobileTop{display:none!important}
+  .brand,.userbox{display:none!important}
+  .bottomNav{left:0!important;right:0!important;width:100%!important}
+  .metrics,.chartGrid{grid-template-columns:1fr!important}
+  .card{max-width:100%!important}
+  .quickFab{right:12px!important}
+}

@@ -649,6 +649,47 @@ app.get('/api/pwa/status',auth,async(req,res)=>{
   res.json({pwa:true,service_worker:true,installable:true,push_placeholder:true});
 });
 
+
+app.post('/api/import/excel/:module',auth,upload.single('file'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'No Excel file uploaded'});
+  const module=req.params.module;
+  const tables={trips:'trips',diesel:'diesel',trucks:'trucks',drivers:'drivers',invoices:'invoices',payroll:'payroll',workers:'workers',maintenance:'maintenance',tyres:'tyres',permits:'permits'};
+  const cols={
+    trips:['trip_no','date','route','from_place','to_place','client','load_desc','truck','trailer','driver','start_km','end_km','km','rate_km','diesel_cost','tolls','permits_cost','food_money','border_cost','repairs','other_cost','status'],
+    diesel:['date','truck','driver','litres','price_per_litre','amount','km','supplier','station','slip_no','pump','attendant','scan_status'],
+    trucks:['truck_no','trailer_no','make_model','driver','status','current_km','next_service_km','license_expiry','roadworthy_expiry','insurance_expiry'],
+    drivers:['name','phone','email','license_expiry','pdp_expiry','passport_expiry','status'],
+    invoices:['date','client','invoice_no','route','amount','paid','status'],
+    payroll:['date','employee','role','basic_salary','days_worked','overtime_hours','advance','deductions'],
+    workers:['date','name','site','role','status','hours','overtime','rate','advance'],
+    maintenance:['date','truck','issue','cost','next_service_km','status'],
+    tyres:['date','truck','position','brand','serial_no','cost','km_fitted','status'],
+    permits:['item','owner','type','expiry_date','cost','status']
+  };
+  const table=tables[module]; if(!table)return res.status(400).json({error:'Unsupported module'});
+  try{
+    const wb=XLSX.readFile(req.file.path);
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});
+    let inserted=0,skipped=0,errors=[];
+    for(const row of rows){
+      const clean={};
+      for(const [k,v] of Object.entries(row)){
+        clean[String(k).trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'')]=v;
+      }
+      const obj={};
+      for(const c of cols[module]) obj[c]=clean[c] ?? clean[c.replace('_','')] ?? '';
+      if(module==='trips') obj.km=Number(obj.km||0)||Math.max(0,Number(obj.end_km||0)-Number(obj.start_km||0));
+      const keys=Object.keys(obj).filter(k=>obj[k]!==''&&obj[k]!==undefined&&obj[k]!==null);
+      if(!keys.length){skipped++;continue;}
+      try{
+        await pool.query(`insert into ${table}(${keys.join(',')}) values(${keys.map((_,i)=>'$'+(i+1)).join(',')})`, keys.map(k=>obj[k]));
+        inserted++;
+      }catch(e){skipped++; if(errors.length<5)errors.push(e.message);}
+    }
+    res.json({module,inserted,skipped,errors});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
 app.get('/api/export/:table/:format',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).send('Unknown');let rows=(await pool.query(`select * from ${t} order by created_at desc`)).rows;let f=req.params.format;if(f==='json')return res.json(rows);if(f==='xlsx'){let wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),req.params.table);res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.xlsx`);return res.send(XLSX.write(wb,{type:'buffer',bookType:'xlsx'}))}if(f==='csv'){res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.csv`);let h=Object.keys(rows[0]||{});return res.send([h.join(','),...rows.map(r=>h.map(k=>JSON.stringify(r[k]??'')).join(','))].join('\\n'))}let doc=new PDFDocument({margin:30});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.pdf`);doc.pipe(res);doc.fontSize(18).text('Angermund Transport - '+req.params.table.toUpperCase());rows.slice(0,200).forEach((r,i)=>doc.fontSize(8).text((i+1)+'. '+JSON.stringify(r)));doc.end()});
 app.get('/api/invoice/:id/pdf',auth,async(req,res)=>{let r=await pool.query('select * from invoices where id=$1',[req.params.id]);if(!r.rowCount)return res.status(404).send('Not found');let i=r.rows[0],doc=new PDFDocument({margin:50});res.setHeader('Content-Type','application/pdf');doc.pipe(res);doc.fontSize(22).text('ANGERMUND TRANSPORT',{align:'center'});doc.moveDown().fontSize(15).text('Invoice: '+(i.invoice_no||i.id));doc.text('Client: '+(i.client||''));doc.text('Route: '+(i.route||''));doc.text('Amount: N$ '+Number(i.amount||0).toFixed(2));doc.text('Paid: N$ '+Number(i.paid||0).toFixed(2));doc.text('Balance: N$ '+(Number(i.amount||0)-Number(i.paid||0)).toFixed(2));doc.end()});
 app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));

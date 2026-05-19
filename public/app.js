@@ -596,3 +596,48 @@ window.addEventListener('load',()=>{
     document.body.classList.add('standalone');
   }
 });
+
+// V14 full-screen mobile + Excel import + stat charts
+function barChart(id, labels, values){
+  const c=document.getElementById(id); if(!c)return; const ctx=c.getContext('2d');
+  const w=c.width=c.offsetWidth*2, h=c.height=440; ctx.clearRect(0,0,w,h); ctx.fillStyle='rgba(255,255,255,.08)'; ctx.fillRect(0,0,w,h);
+  const max=Math.max(...values,1), bw=w/(Math.max(values.length,1)*1.7);
+  values.forEach((v,i)=>{const x=24+i*bw*1.7,bh=(v/max)*(h-80);ctx.fillStyle='#2e8cff';ctx.fillRect(x,h-48-bh,bw,bh);ctx.fillStyle='white';ctx.font='22px Arial';ctx.fillText(String(labels[i]||'').slice(0,9),x,h-15);});
+}
+function lineChart(id, labels, values){
+  const c=document.getElementById(id); if(!c)return; const ctx=c.getContext('2d');
+  const w=c.width=c.offsetWidth*2, h=c.height=440; ctx.clearRect(0,0,w,h); ctx.fillStyle='rgba(255,255,255,.08)'; ctx.fillRect(0,0,w,h);
+  const max=Math.max(...values,1); ctx.strokeStyle='#45ff67'; ctx.lineWidth=5; ctx.beginPath();
+  values.forEach((v,i)=>{const x=28+i*((w-56)/Math.max(values.length-1,1)), y=h-45-(v/max)*(h-90); if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y);}); ctx.stroke();
+}
+function groupSum(rows,key,fn){const o={};(rows||[]).forEach(r=>{const k=r[key]||'Unknown';o[k]=(o[k]||0)+fn(r)});return o}
+function drawDashboardCharts(){
+  const trips=cache.trips||[], diesel=cache.diesel||[];
+  const route=groupSum(trips,'route',t=>Number(t.km||0)*Number(t.rate_km||0));
+  const driver=groupSum(trips,'driver',t=>tripCalc(t).profit);
+  const dies=groupSum(diesel,'date',d=>Number(d.amount||0));
+  const truck=groupSum(trips,'truck',t=>Number(t.km||0));
+  barChart('routeChart',Object.keys(route),Object.values(route));
+  barChart('driverChart',Object.keys(driver),Object.values(driver));
+  lineChart('dieselChart',Object.keys(dies),Object.values(dies));
+  barChart('truckChart',Object.keys(truck),Object.values(truck));
+}
+function addDashboardCharts(){
+  const dash=document.getElementById('dashboard'); if(!dash||document.getElementById('chartSection'))return;
+  const div=document.createElement('div'); div.id='chartSection'; div.className='chartGrid';
+  div.innerHTML=`<div class="card chartBox"><h2>Revenue by Route</h2><canvas class="statChart" id="routeChart"></canvas></div><div class="card chartBox"><h2>Profit by Driver</h2><canvas class="statChart" id="driverChart"></canvas></div><div class="card chartBox"><h2>Diesel Spend Trend</h2><canvas class="statChart" id="dieselChart"></canvas></div><div class="card chartBox"><h2>Trip KM by Truck</h2><canvas class="statChart" id="truckChart"></canvas></div>`;
+  dash.appendChild(div); drawDashboardCharts();
+}
+function renderImports(){
+  const sec=document.getElementById('imports'); if(!sec)return;
+  sec.innerHTML=`<div class="head"><h1>Excel Import</h1></div><div class="card importBox"><h2>Upload old Excel data</h2><p class="help">Choose module and upload Excel/CSV. First row must have headings like route, driver, truck, km, amount, date.</p><select id="importModule"><option value="trips">Trips</option><option value="diesel">Diesel</option><option value="trucks">Trucks</option><option value="drivers">Drivers</option><option value="invoices">Invoices</option><option value="payroll">Payroll</option><option value="workers">Site Workers</option><option value="maintenance">Maintenance</option><option value="tyres">Tyres</option><option value="permits">Permits</option></select><br><br><input type="file" id="excelFile" accept=".xlsx,.xls,.csv"><br><br><button class="btn green" onclick="uploadExcel()">Import Excel</button><pre id="importResult"></pre></div>`;
+}
+async function uploadExcel(){
+  const f=document.getElementById('excelFile').files[0]; if(!f)return alert('Choose Excel file first');
+  const fd=new FormData(); fd.append('file',f); importResult.innerText='Uploading...';
+  const r=await fetch('/api/import/excel/'+document.getElementById('importModule').value,{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
+  const j=await r.json(); importResult.innerText=JSON.stringify(j,null,2); await loadAll(); alert('Import done: '+(j.inserted||0)+' rows inserted');
+}
+const oldRenderDash14=renderDash; renderDash=function(d){oldRenderDash14(d); setTimeout(addDashboardCharts,100);}
+const oldShow14=show; show=function(id,btn){oldShow14(id,btn); if(id==='imports')renderImports(); if(id==='dashboard')setTimeout(addDashboardCharts,100);}
+const oldLoadAll14=loadAll; loadAll=async function(){await oldLoadAll14(); setTimeout(()=>{addDashboardCharts();drawDashboardCharts();},250);}
