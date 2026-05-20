@@ -1129,3 +1129,242 @@ show = function(id,btn){
     setTimeout(()=>{renderBetterAlerts(lastDashboardData.alerts); drawBetterGraphs(lastDashboardData);},200);
   }
 };
+
+
+// V20: guaranteed visible SVG charts + totals/payment consistency
+let dashboardV20=null;
+
+function svgBarChart(title, dataObj){
+  const labels=Object.keys(dataObj||{}).slice(0,8);
+  const vals=labels.map(k=>Number(dataObj[k]||0));
+  const max=Math.max(...vals.map(v=>Math.abs(v)),1);
+  const bars=labels.map((l,i)=>{
+    const v=vals[i];
+    const x=30+i*(330/Math.max(labels.length,1));
+    const bw=Math.max(18, 240/Math.max(labels.length,1));
+    const bh=Math.max(2,(Math.abs(v)/max)*145);
+    const y=185-bh;
+    const color=v<0?'#ff4e4e':'#2e8cff';
+    return `<rect x="${x}" y="${y}" width="${bw}" height="${bh}" rx="5" fill="${color}"></rect>
+      <text x="${x}" y="218" class="chartLabel">${String(l).slice(0,9)}</text>
+      <text x="${x}" y="${Math.max(18,y-6)}" class="chartValue">${Math.round(v).toLocaleString()}</text>`;
+  }).join('');
+  return `<div class="card"><h2>${title}</h2><svg class="svgChart" viewBox="0 0 390 240" preserveAspectRatio="none">
+    <line x1="20" y1="185" x2="370" y2="185" stroke="#ffffff22"/>
+    ${bars || '<text x="25" y="120" fill="#fff">No data yet</text>'}
+  </svg></div>`;
+}
+
+function svgPieChart(title, dataObj){
+  const labels=Object.keys(dataObj||{}).filter(k=>Number(dataObj[k]||0)>0).slice(0,6);
+  const vals=labels.map(k=>Number(dataObj[k]||0));
+  const total=vals.reduce((a,b)=>a+b,0);
+  if(!total) return `<div class="card"><h2>${title}</h2><svg class="svgChart" viewBox="0 0 390 240"><text x="25" y="120" fill="#fff">No data yet</text></svg></div>`;
+  let y=48;
+  const items=labels.map((l,i)=>{
+    const pct=Math.round(vals[i]/total*100);
+    const colors=['#2e8cff','#45ff67','#ffb020','#a855f7','#ff4e4e','#38d6c9'];
+    const w=Math.max(8,pct*2.6);
+    const row=`<rect x="35" y="${y-13}" width="${w}" height="16" rx="5" fill="${colors[i%colors.length]}"></rect>
+      <text x="35" y="${y+18}" class="chartLabel">${String(l).slice(0,18)} — ${pct}%</text>`;
+    y+=34; return row;
+  }).join('');
+  return `<div class="card"><h2>${title}</h2><svg class="svgChart" viewBox="0 0 390 240">${items}</svg></div>`;
+}
+
+function renderV20Charts(d){
+  const dash=document.getElementById('dashboard'); if(!dash||!d)return;
+  let box=document.getElementById('v20Charts');
+  if(!box){
+    box=document.createElement('div');
+    box.id='v20Charts';
+    box.className='chartTopGrid';
+    const after=document.getElementById('invoiceMetricRow') || dash.querySelector('.metrics');
+    if(after && after.parentNode) after.parentNode.insertBefore(box, after.nextSibling);
+    else dash.prepend(box);
+  }
+  box.innerHTML =
+    svgBarChart('Revenue by Route',d.charts?.revenueByRoute||{})+
+    svgBarChart('Profit by Driver',d.charts?.profitByDriver||{})+
+    svgPieChart('Expenses Breakdown',d.charts?.expensesBreakdown||{})+
+    svgBarChart('Receivables by Client',d.charts?.receivablesByClient||{})+
+    svgBarChart('Diesel by Truck',d.charts?.dieselByTruck||{})+
+    svgPieChart('Invoice Status',d.charts?.invoiceStatus||{});
+}
+
+function renderPaymentExplanation(d){
+  const dash=document.getElementById('dashboard'); if(!dash||!d)return;
+  let box=document.getElementById('paymentExplain');
+  if(!box){
+    box=document.createElement('div'); box.id='paymentExplain'; box.className='card';
+    const alertsTitle=[...dash.querySelectorAll('h2')].find(h=>h.textContent.includes('Alerts'));
+    if(alertsTitle) alertsTitle.parentElement.before(box); else dash.appendChild(box);
+  }
+  const diff=Number(d.metrics?.paymentDifference||0);
+  box.innerHTML=`<h2>Payments Check</h2>
+    <p><b>Invoice Paid:</b> ${money(d.metrics?.invoicePaid||0)} | <b>Payment Records:</b> ${money(d.metrics?.paymentsRecorded||0)} | <b>Difference:</b> ${money(diff)}</p>
+    ${Math.abs(diff)>0.01?'<div class="paymentWarn">Payment records and invoice paid totals do not match. This can happen if invoice paid was edited directly or old test payments exist.</div>':''}
+    <button class="btn green" onclick="reconcilePayments()">Reconcile Payments From Invoices</button>`;
+}
+
+async function reconcilePayments(){
+  if(!confirm('This will create reconciled payment records from all invoices with paid amounts. Continue?'))return;
+  try{
+    const r=await api('/accounting/reconcile-payments',{method:'POST',body:{}});
+    alert('Reconciled '+r.payments+' payments totalling '+money(r.total));
+    await loadAll();
+  }catch(e){alert(e.message)}
+}
+
+const oldRenderDashV20 = renderDash;
+renderDash = function(d){
+  dashboardV20=d;
+  oldRenderDashV20(d);
+  setTimeout(()=>{renderV20Charts(d);renderPaymentExplanation(d);},100);
+};
+
+const oldShowV20 = show;
+show = function(id,btn){
+  oldShowV20(id,btn);
+  if(id==='dashboard' && dashboardV20)setTimeout(()=>{renderV20Charts(dashboardV20);renderPaymentExplanation(dashboardV20);},150);
+};
+
+
+// V21: Every feature connected to its own tab + Excel update/sync per module
+const MODULE_TOOLS = {
+  trips:{label:'Trips', ai:'pod', excel:'trips', pay:'Driver food money / trip advance'},
+  diesel:{label:'Diesel', ai:'diesel', excel:'diesel'},
+  trucks:{label:'Fleet / Trucks', excel:'trucks'},
+  drivers:{label:'Drivers', excel:'drivers'},
+  invoices:{label:'Invoices', ai:'invoice', excel:'invoices', pay:'Invoice / supplier payment'},
+  payroll:{label:'Payroll', excel:'payroll', pay:'Payroll / advance payment'},
+  workers:{label:'Site Workers', excel:'workers', pay:'Site worker payment'},
+  maintenance:{label:'Maintenance', ai:'workshop', excel:'maintenance', pay:'Workshop / repair payment'},
+  tyres:{label:'Tyres', ai:'tyre', excel:'tyres'},
+  permits:{label:'Permits', ai:'permit', excel:'permits', pay:'Permit / license payment'},
+  fines:{label:'Fines / Damages', excel:'fines'},
+  border:{label:'Border Logs', ai:'border', excel:'border'},
+  payments:{label:'Payments', excel:'payments', pay:'General payment'}
+};
+
+function moduleToolHtml(page,cfg){
+  return `<div class="moduleTools" id="tools_${page}">
+    <h3>${cfg.label} Tools <span class="syncBadge">Connected</span></h3>
+    <div class="toolRow">
+      ${cfg.ai?`<input id="toolFile_${page}" type="file" accept="image/*,.pdf"><button class="btn orange" onclick="toolScan('${page}','${cfg.ai}')">🤖 AI Scan</button>`:''}
+      ${cfg.excel?`<input id="excel_${page}" type="file" accept=".xlsx,.xls,.csv"><button class="btn green" onclick="toolExcelSync('${page}','${cfg.excel}')">📥 Excel Sync</button>`:''}
+      ${cfg.excel?`<button class="btn gray" onclick="window.open('/api/export/${cfg.excel}/xlsx','_blank')">📤 Export Excel</button>`:''}
+      ${cfg.pay?`<button class="btn payBtn" onclick="openBankWindhoek('${cfg.pay}')">💳 Pay</button>`:''}
+    </div>
+    <pre id="toolOut_${page}" class="help"></pre>
+  </div>`;
+}
+
+function attachConnectedTools(){
+  for(const [page,cfg] of Object.entries(MODULE_TOOLS)){
+    const sec=document.getElementById(page);
+    if(!sec || sec.querySelector('#tools_'+page)) continue;
+    const wrap=document.createElement('div');
+    wrap.innerHTML=moduleToolHtml(page,cfg);
+    const first=sec.firstElementChild;
+    if(first) sec.insertBefore(wrap, first); else sec.appendChild(wrap);
+  }
+}
+
+async function toolScan(page,docType){
+  const f=document.getElementById('toolFile_'+page)?.files?.[0];
+  const out=document.getElementById('toolOut_'+page);
+  if(!f)return alert('Choose document/photo first');
+  const fd=new FormData(); fd.append('file',f);
+  out.innerText='AI scanning...';
+  const r=await fetch('/api/ai/scan/'+docType,{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
+  const j=await r.json();
+  out.innerText=JSON.stringify(j,null,2);
+  await loadAll();
+  alert(j.scan_status==='partial_auto'?'AI scanned. Check missing fields only.':'Manual check required or AI quota/key issue.');
+}
+
+async function toolExcelSync(page,module){
+  const f=document.getElementById('excel_'+page)?.files?.[0];
+  const out=document.getElementById('toolOut_'+page);
+  if(!f)return alert('Choose Excel/CSV file first');
+  const fd=new FormData(); fd.append('file',f);
+  out.innerText='Syncing Excel... Existing records update; new records insert.';
+  const r=await fetch('/api/import/excel/'+module,{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
+  const j=await r.json();
+  out.innerText=JSON.stringify(j,null,2);
+  await loadAll();
+  alert(`Excel sync done. Inserted: ${j.inserted||0}, Updated: ${j.updated||0}, Skipped: ${j.skipped||0}`);
+}
+
+renderSmartAI = function(){
+  const sec=document.getElementById('smartai'); if(!sec)return;
+  sec.innerHTML=`<div class="head"><h1>Smart AI Centre</h1></div>
+  <div class="card"><h2>AI is now connected to each tab</h2>
+  <p>Use the AI Scan button inside Diesel, Trips, Invoices, Permits, Tyres, Maintenance/Workshop and Border Logs. Excel Sync is also inside each module.</p>
+  <button class="btn" onclick="show('trips')">Trips / POD AI</button>
+  <button class="btn" onclick="show('diesel')">Diesel AI</button>
+  <button class="btn" onclick="show('invoices')">Invoice AI</button>
+  <button class="btn" onclick="show('permits')">Permit AI</button>
+  </div>
+  <div class="card"><h2>Company AI Assistant</h2><textarea id="aiQuestion" placeholder="Ask about routes, diesel, drivers, profit..."></textarea><br><button class="btn" onclick="askAI()">Ask AI</button><pre id="aiAnswer"></pre></div>`;
+};
+
+function renderExcelSyncHome(){
+  const sec=document.getElementById('imports'); if(!sec)return;
+  sec.innerHTML=`<div class="head"><h1>Excel Sync Centre</h1></div>
+  <div class="card"><h2>Excel sync now lives in each tab</h2>
+  <p>Open Trips, Diesel, Invoices, Payroll, Trucks, Drivers, etc. Each tab now has its own Excel Sync and Export Excel buttons.</p>
+  <p><b>Sync rule:</b> if the same key exists, the row updates. If not, a new row is added.</p>
+  <ul>
+    <li>Trips update by trip_no</li>
+    <li>Diesel updates by slip_no + truck</li>
+    <li>Invoices update by invoice_no</li>
+    <li>Trucks update by truck_no</li>
+    <li>Drivers update by name</li>
+  </ul></div>`;
+}
+
+const oldShowV21=show;
+show=function(id,btn){
+  oldShowV21(id,btn);
+  setTimeout(()=>{attachConnectedTools(); if(id==='imports')renderExcelSyncHome();},120);
+};
+
+const oldLoadAllV21=loadAll;
+loadAll=async function(){
+  await oldLoadAllV21();
+  setTimeout(attachConnectedTools,200);
+};
+
+setTimeout(attachConnectedTools,1000);
+
+
+// V22 Full Smart AI Suite
+async function runAIEndpoint(path,label){try{const r=await api(path,{method:'POST',body:{}});alert(label+' complete');await loadAll();return r}catch(e){alert(label+' failed: '+e.message)}}
+async function startTripSession(){navigator.geolocation.getCurrentPosition(async p=>{const truck=prompt('Truck number?','')||'';const route=prompt('Route / destination?','')||'';const r=await api('/trip-session/start',{method:'POST',body:{truck,route,lat:p.coords.latitude,lng:p.coords.longitude}});localStorage.setItem('activeTripSession',r.session.id);alert('Trip started')},e=>alert('GPS error: '+e.message))}
+async function endTripSession(){navigator.geolocation.getCurrentPosition(async p=>{const id=localStorage.getItem('activeTripSession');await api('/trip-session/end',{method:'POST',body:{id,lat:p.coords.latitude,lng:p.coords.longitude}});localStorage.removeItem('activeTripSession');alert('Trip ended. Press Generate Trips to create trip.')},e=>alert('GPS error: '+e.message))}
+async function voiceAIParse(){const transcript=document.getElementById('voiceTranscript')?.value;if(!transcript)return alert('Type or paste driver voice note first');const r=await api('/ai/voice-ai',{method:'POST',body:{transcript}});document.getElementById('voiceResult').innerText=JSON.stringify(r,null,2);await loadAll()}
+function startBrowserVoice(){const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR)return alert('Voice not supported on this browser. Type it manually.');const rec=new SR();rec.lang='en-US';rec.onresult=e=>{document.getElementById('voiceTranscript').value=e.results[0][0].transcript};rec.start()}
+function renderSmartAISuite(){
+ const sec=document.getElementById('smartai'); if(!sec)return;
+ sec.innerHTML=`<div class="head"><h1>Full Smart AI Suite</h1><button class="btn green" onclick="runAllSmartAI()">Run AI Checks</button></div>
+ <div class="tripSessionBox"><h2>Smart Auto Trip Generator</h2><button class="btn green" onclick="startTripSession()">Start Trip</button> <button class="btn red" onclick="endTripSession()">End Trip</button> <button class="btn orange" onclick="runAIEndpoint('/api/ai/auto-trip-generator','Auto Trip Generator')">Generate Trips From GPS + Docs</button><p class="help">Driver starts/ends trip with GPS. AI creates trip using GPS, diesel slips, PODs and uploads.</p></div>
+ <div class="aiSuiteGrid">
+ <div class="aiSuiteCard"><h2>Fleet AI</h2><p>Services, tyres, workshop risks.</p><button class="btn" onclick="runAIEndpoint('/api/ai/fleet-ai','Fleet AI')">Run Fleet AI</button></div>
+ <div class="aiSuiteCard"><h2>Finance AI</h2><p>Receivables, cashflow, profit warnings.</p><button class="btn" onclick="runAIEndpoint('/api/ai/finance-ai','Finance AI')">Run Finance AI</button></div>
+ <div class="aiSuiteCard"><h2>Driver AI</h2><p>Driver scoring, diesel cost per KM.</p><button class="btn" onclick="runAIEndpoint('/api/ai/driver-ai','Driver AI')">Run Driver AI</button></div>
+ <div class="aiSuiteCard"><h2>WhatsApp AI</h2><p>Processes WhatsApp/driver uploaded slips.</p><button class="btn" onclick="runAIEndpoint('/api/ai/whatsapp-ai','WhatsApp AI')">Run WhatsApp AI</button></div>
+ <div class="aiSuiteCard"><h2>Excel AI Sync</h2><p>Checks import history and sync problems.</p><button class="btn" onclick="runAIEndpoint('/api/ai/excel-ai-sync','Excel AI Sync')">Run Excel AI</button></div>
+ <div class="aiSuiteCard voiceBox"><h2>Voice AI</h2><button class="btn gray" onclick="startBrowserVoice()">🎙️ Record Voice</button><textarea id="voiceTranscript" placeholder="Loaded Windhoek to Cape Town with truck N205, driver John..."></textarea><button class="btn" onclick="voiceAIParse()">Parse Voice / Create Trip</button><pre id="voiceResult"></pre></div>
+ </div><div class="card"><h2>AI Assistant</h2><textarea id="aiQuestion" placeholder="Ask about routes, diesel, drivers, profit..."></textarea><br><button class="btn" onclick="askAI()">Ask AI</button><pre id="aiAnswer"></pre></div>`;
+}
+async function runAllSmartAI(){await runAIEndpoint('/api/ai/fleet-ai','Fleet AI');await runAIEndpoint('/api/ai/finance-ai','Finance AI');await runAIEndpoint('/api/ai/driver-ai','Driver AI');await runAIEndpoint('/api/ai/whatsapp-ai','WhatsApp AI');await runAIEndpoint('/api/ai/excel-ai-sync','Excel AI Sync')}
+renderSmartAI=renderSmartAISuite;
+function attachV22SmartButtons(){
+ const m={trips:['Auto Trip Generator','/api/ai/auto-trip-generator'],trucks:['Fleet AI','/api/ai/fleet-ai'],maintenance:['Fleet AI','/api/ai/fleet-ai'],tyres:['Fleet AI','/api/ai/fleet-ai'],invoices:['Finance AI','/api/ai/finance-ai'],payments:['Finance AI','/api/ai/finance-ai'],drivers:['Driver AI','/api/ai/driver-ai'],peoplehub:['Driver AI','/api/ai/driver-ai'],whatsapp:['WhatsApp AI','/api/ai/whatsapp-ai'],imports:['Excel AI Sync','/api/ai/excel-ai-sync']};
+ for(const [id,[label,path]] of Object.entries(m)){const sec=document.getElementById(id);if(sec&&!sec.querySelector('.v22smartbtn')){const div=document.createElement('div');div.className='moduleTools v22smartbtn';div.innerHTML=`<h3>${label}</h3><button class="btn orange" onclick="runAIEndpoint('${path}','${label}')">🤖 Run ${label}</button>`;sec.prepend(div);}}
+}
+const oldShowV22=show;show=function(id,btn){oldShowV22(id,btn);setTimeout(()=>{if(id==='smartai')renderSmartAISuite();attachV22SmartButtons()},120)}
+const oldLoadAllV22=loadAll;loadAll=async function(){await oldLoadAllV22();setTimeout(attachV22SmartButtons,200)}
+setTimeout(attachV22SmartButtons,1000);

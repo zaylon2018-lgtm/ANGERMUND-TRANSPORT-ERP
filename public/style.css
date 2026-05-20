@@ -184,3 +184,25 @@ canvas.statChart{width:100%;height:220px;background:#0003;border-radius:12px}
 .graphCard{min-height:300px}
 .graphCanvas{width:100%;height:240px;background:#05080ecc;border-radius:14px}
 @media(max-width:1000px){.graphGrid{grid-template-columns:1fr}.graphCanvas{height:230px}}
+
+/* V20 visible SVG charts and payment explanation */
+.chartTopGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:12px 0}
+.svgChart{width:100%;height:260px;background:#05080ee6;border-radius:16px;border:1px solid #ffffff18}
+.chartLabel{font-size:11px;fill:#fff}
+.chartValue{font-size:10px;fill:#bfe3ff}
+.paymentWarn{border-left:4px solid #ffb020;background:#3a260877;padding:10px;border-radius:10px;margin:8px 0}
+@media(max-width:1000px){.chartTopGrid{grid-template-columns:1fr}.svgChart{height:240px}}
+
+/* V21 connected tabs + excel sync */
+.moduleTools{border:1px solid #2e8cff66;background:#07111fcc;border-radius:16px;padding:14px;margin:12px 0}
+.moduleTools h3{margin:0 0 8px}
+.toolRow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.syncBadge{display:inline-block;background:#12395f;border-radius:999px;padding:4px 9px;font-size:12px;margin-left:6px}
+@media(max-width:1000px){.toolRow input,.toolRow select,.toolRow button{width:100%;}.moduleTools{padding:12px}}
+
+/* V22 full smart AI */
+.aiSuiteGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.aiSuiteCard{border:1px solid #2e8cff66;background:#07111fcc;border-radius:16px;padding:14px}
+.voiceBox textarea{width:100%;min-height:90px}
+.tripSessionBox{border:1px solid #45ff6766;border-radius:14px;padding:12px;background:#071b12aa;margin:10px 0}
+@media(max-width:1000px){.aiSuiteGrid{grid-template-columns:1fr}.aiSuiteCard .btn{width:100%;margin-top:8px}}

@@ -19,7 +19,7 @@ app.use(express.static(path.join(__dirname,'public')));
 const pool=new pg.Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_URL?{rejectUnauthorized:false}:false});
 const upload=multer({dest:path.join(__dirname,'uploads'),limits:{fileSize:8*1024*1024}});
 
-const tableMap={trips:'trips',trucks:'trucks',drivers:'drivers',diesel:'diesel',permits:'permits',payroll:'payroll',workers:'workers',maintenance:'maintenance',tyres:'tyres',workshop:'workshop_jobs',fines:'fines_damages',border:'border_logs',gps:'gps_points',invoices:'invoices',users:'users',reminders:'reminders',masters:'masters',accounts:'accounts',transactions:'account_transactions',vendors:'vendors',customers:'customers',payments:'payments',ai_documents:'ai_documents',ai_alerts:'ai_alerts',upload_queue:'upload_queue',integration_logs:'integration_logs'};
+const tableMap={trips:'trips',trucks:'trucks',drivers:'drivers',diesel:'diesel',permits:'permits',payroll:'payroll',workers:'workers',maintenance:'maintenance',tyres:'tyres',workshop:'workshop_jobs',fines:'fines_damages',border:'border_logs',gps:'gps_points',invoices:'invoices',users:'users',reminders:'reminders',masters:'masters',accounts:'accounts',transactions:'account_transactions',vendors:'vendors',customers:'customers',payments:'payments',ai_documents:'ai_documents',ai_alerts:'ai_alerts',upload_queue:'upload_queue',integration_logs:'integration_logs',excel_imports:'excel_imports',excel_sync_profiles:'excel_sync_profiles',ai_recommendations:'ai_recommendations',voice_notes:'voice_notes',trip_sessions:'trip_sessions',whatsapp_inbox:'whatsapp_inbox'};
 
 const schema=`
 create table if not exists users(id serial primary key,email text unique not null,password_hash text not null,name text,role text default 'admin',created_at timestamptz default now());
@@ -41,6 +41,35 @@ create table if not exists gps_points(id serial primary key,email text,driver te
 
 
 
+
+
+
+create table if not exists ai_recommendations(id serial primary key,module text,title text,message text,severity text default 'Info',status text default 'Open',created_at timestamptz default now());
+create table if not exists voice_notes(id serial primary key,driver text,truck text,transcript text,parsed_json jsonb default '{}'::jsonb,status text default 'Parsed',created_at timestamptz default now());
+create table if not exists trip_sessions(id serial primary key,driver text,truck text,route text,start_time timestamptz default now(),end_time timestamptz,start_lat numeric,start_lng numeric,end_lat numeric,end_lng numeric,status text default 'Started',generated_trip_id integer,created_at timestamptz default now());
+create table if not exists whatsapp_inbox(id serial primary key,from_number text,driver text,truck text,message text,media_url text,doc_type text,status text default 'Queued',created_at timestamptz default now());
+
+create table if not exists excel_imports(
+  id serial primary key,
+  module text,
+  filename text,
+  rows_inserted integer default 0,
+  rows_updated integer default 0,
+  rows_skipped integer default 0,
+  status text default 'Imported',
+  message text,
+  created_at timestamptz default now()
+);
+create table if not exists excel_sync_profiles(
+  id serial primary key,
+  module text,
+  profile_name text,
+  column_map jsonb default '{}'::jsonb,
+  unique_key text default '',
+  last_file text,
+  last_sync timestamptz,
+  created_at timestamptz default now()
+);
 
 create table if not exists ai_trip_jobs(
   id serial primary key,
@@ -182,6 +211,7 @@ app.get('/api/me',auth,(req,res)=>res.json({user:req.user}));
 app.get('/api/options',auth,async(req,res)=>{let rows=(await pool.query('select type,value from masters order by type,value')).rows,out={};rows.forEach(r=>(out[r.type] ||= []).push(r.value));res.json(out)});
 
 
+
 app.get('/api/dashboard',auth,async(req,res)=>{
   if(String(req.user.role||'').toLowerCase()==='driver')return res.status(403).json({error:'Driver cannot access office dashboard'});
 
@@ -195,19 +225,30 @@ app.get('/api/dashboard',auth,async(req,res)=>{
   const tyres=(await pool.query('select * from tyres order by created_at desc')).rows;
   const payroll=(await pool.query('select * from payroll order by created_at desc')).rows;
   const fines=(await pool.query('select * from fines_damages order by created_at desc')).rows;
+  const paymentRows=(await pool.query('select * from payments order by created_at desc')).rows;
 
   const dieselTotal=dieselRows.reduce((a,d)=>a+Number(d.amount||0),0);
   let tripRevenue=0, tripExpenses=Number(dieselTotal), km=0;
   trips.forEach(t=>{let c=tripCalc(t);tripRevenue+=c.income;tripExpenses+=c.cost;km+=Number(t.km||0)});
+
   const invoiceRevenue=invoices.reduce((a,i)=>a+Number(i.amount||0),0);
   const invoicePaid=invoices.reduce((a,i)=>a+Number(i.paid||0),0);
-  const receivables=invoiceRevenue-invoicePaid;
-  const payments=(await pool.query('select coalesce(sum(amount),0) v from payments')).rows[0].v;
+  const receivables=Math.max(0,invoiceRevenue-invoicePaid);
+
+  // Payments recorded is now the actual payments table. It may differ from Invoice Paid if someone edited invoice paid directly.
+  const paymentsRecorded=paymentRows.reduce((a,p)=>a+Number(p.amount||0),0);
+  const paymentDifference=invoicePaid-paymentsRecorded;
+
+  const payrollTotal=payroll.reduce((a,p)=>a+Number(p.basic_salary||0)+Number(p.advance||0)-Number(p.deductions||0),0);
+  const maintenanceTotal=maintenance.reduce((a,m)=>a+Number(m.cost||0),0);
+  const tyreTotal=tyres.reduce((a,t)=>a+Number(t.cost||0),0);
+  const finesTotal=fines.reduce((a,f)=>a+Number(f.amount||0),0);
+
   const revenue=invoiceRevenue>0 ? invoiceRevenue : tripRevenue;
   const expenses=tripExpenses;
-
   const alerts=[];
   const today=new Date();
+
   function daysLeft(dateVal){
     if(!dateVal) return null;
     const d=new Date(dateVal);
@@ -218,12 +259,7 @@ app.get('/api/dashboard',auth,async(req,res)=>{
     const days=daysLeft(dateVal);
     if(days===null) return;
     if(days<=45){
-      alerts.push({
-        type:module,
-        severity:days<0?'Expired':(days<=7?'Urgent':'Warning'),
-        message:`${module}: ${name} ${field} ${days<0?'expired':'expires'} ${Math.abs(days)} day(s) ${days<0?'ago':'from now'}`,
-        due_date:dateVal
-      });
+      alerts.push({type:module,severity:days<0?'Expired':(days<=7?'Urgent':'Warning'),message:`${module}: ${name} ${field} ${days<0?'expired':'expires'} ${Math.abs(days)} day(s) ${days<0?'ago':'from now'}`,due_date:dateVal});
     }
   }
 
@@ -244,25 +280,16 @@ app.get('/api/dashboard',auth,async(req,res)=>{
   });
   permits.forEach(p=>addExpiry('Permit',`${p.item||''} ${p.owner||''}`.trim()||'Permit','expiry',p.expiry_date));
   invoices.forEach(i=>{
-    if(Number(i.amount||0)>Number(i.paid||0)){
-      alerts.push({type:'Invoice',severity:'Info',message:`Invoice ${i.invoice_no||i.id} unpaid/part-paid for ${i.client||'client'}: balance N$ ${(Number(i.amount||0)-Number(i.paid||0)).toFixed(2)}`});
-    }
+    const bal=Number(i.amount||0)-Number(i.paid||0);
+    if(bal>0) alerts.push({type:'Invoice',severity:'Info',message:`Invoice ${i.invoice_no||i.id} unpaid/part-paid for ${i.client||'client'}: balance N$ ${bal.toFixed(2)}`});
   });
-  maintenance.forEach(m=>{
-    if(String(m.status||'').toLowerCase()!=='closed' && String(m.status||'').toLowerCase()!=='completed'){
-      alerts.push({type:'Maintenance',severity:'Info',message:`Open maintenance: ${m.truck||''} ${m.issue||''}`});
-    }
-  });
-  tyres.forEach(t=>{
-    if(['worn','replace','damaged'].includes(String(t.status||'').toLowerCase())){
-      alerts.push({type:'Tyre',severity:'Warning',message:`Tyre attention: ${t.truck||''} ${t.position||''} ${t.status||''}`});
-    }
-  });
-  fines.forEach(f=>{
-    if(String(f.status||'').toLowerCase()!=='closed' && Number(f.amount||0)>0){
-      alerts.push({type:'Fine/Damage',severity:'Warning',message:`Open fine/damage: ${f.driver||f.truck||''} N$ ${Number(f.amount||0).toFixed(2)} ${f.description||''}`});
-    }
-  });
+  if(Math.abs(paymentDifference)>0.01){
+    alerts.push({type:'Payments',severity:'Warning',message:`Invoice paid total and payment records differ by N$ ${paymentDifference.toFixed(2)}. Use Reconcile Payments button in Accounting/Books.`});
+  }
+  maintenance.forEach(m=>{ if(!['closed','completed'].includes(String(m.status||'').toLowerCase())) alerts.push({type:'Maintenance',severity:'Info',message:`Open maintenance: ${m.truck||''} ${m.issue||''}`}); });
+  tyres.forEach(t=>{ if(['worn','replace','damaged'].includes(String(t.status||'').toLowerCase())) alerts.push({type:'Tyre',severity:'Warning',message:`Tyre attention: ${t.truck||''} ${t.position||''} ${t.status||''}`}); });
+  fines.forEach(f=>{ if(String(f.status||'').toLowerCase()!=='closed' && Number(f.amount||0)>0) alerts.push({type:'Fine/Damage',severity:'Warning',message:`Open fine/damage: ${f.driver||f.truck||''} N$ ${Number(f.amount||0).toFixed(2)} ${f.description||''}`}); });
+
   const reminderRows=(await pool.query("select * from reminders where status <> 'Closed' and due_date <= current_date + interval '30 days' order by due_date asc limit 50")).rows;
   reminderRows.forEach(r=>alerts.push({type:'Reminder',severity:r.priority||'Normal',message:`Reminder: ${r.title||''} due ${r.due_date||''}`}));
 
@@ -271,6 +298,7 @@ app.get('/api/dashboard',auth,async(req,res)=>{
   function group(rows,key,fn){
     const o={}; rows.forEach(r=>{const k=r[key]||'Unknown'; o[k]=(o[k]||0)+fn(r);}); return o;
   }
+
   const charts={
     revenueByRoute: group(trips,'route',t=>Number(t.km||0)*Number(t.rate_km||0)),
     profitByDriver: group(trips,'driver',t=>tripCalc(t).profit),
@@ -278,21 +306,16 @@ app.get('/api/dashboard',auth,async(req,res)=>{
     dieselByTruck: group(dieselRows,'truck',d=>Number(d.amount||0)),
     dieselLitresByTruck: group(dieselRows,'truck',d=>Number(d.litres||0)),
     invoiceStatus: group(invoices,'status',i=>1),
-    expensesBreakdown:{
-      diesel:dieselTotal,
-      payroll:payroll.reduce((a,p)=>a+Number(p.basic_salary||0)+Number(p.advance||0)-Number(p.deductions||0),0),
-      maintenance:maintenance.reduce((a,m)=>a+Number(m.cost||0),0),
-      tyres:tyres.reduce((a,t)=>a+Number(t.cost||0),0),
-      fines:fines.reduce((a,f)=>a+Number(f.amount||0),0)
-    },
-    monthlyRevenue: group(trips,'date',t=>Number(t.km||0)*Number(t.rate_km||0)),
-    receivablesByClient: group(invoices,'client',i=>Number(i.amount||0)-Number(i.paid||0))
+    expensesBreakdown:{diesel:dieselTotal,payroll:payrollTotal,maintenance:maintenanceTotal,tyres:tyreTotal,fines:finesTotal},
+    receivablesByClient: group(invoices,'client',i=>Math.max(0,Number(i.amount||0)-Number(i.paid||0))),
+    paymentsByParty: group(paymentRows,'party',p=>Number(p.amount||0))
   };
 
   res.json({
-    metrics:{revenue,expenses,profit:revenue-expenses,km,diesel:Number(dieselTotal),invoiceRevenue,invoicePaid,receivables,payments:Number(payments)},
+    metrics:{revenue,expenses,profit:revenue-expenses,km,diesel:Number(dieselTotal),invoiceRevenue,invoicePaid,receivables,paymentsRecorded,paymentDifference},
     recent:trips.slice(0,8),
     invoices:invoices.slice(0,8),
+    payments:paymentRows.slice(0,10),
     alerts:alerts.slice(0,80),
     gps,
     charts
@@ -812,122 +835,186 @@ app.get('/api/pwa/status',auth,async(req,res)=>{
 });
 
 
+
+function normKey(k){
+  return String(k||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
+}
+function normalizeExcelRow(row){
+  const clean={};
+  for(const [k,v] of Object.entries(row||{})){
+    clean[normKey(k)] = v;
+  }
+  return clean;
+}
+const IMPORT_COLS={
+  trips:['trip_no','date','device_time','route','from_place','to_place','client','load_desc','truck','trailer','driver','start_km','end_km','km','rate_km','diesel_cost','tolls','permits_cost','food_money','border_cost','repairs','other_cost','status'],
+  diesel:['date','device_time','truck','driver','litres','price_per_litre','amount','km','supplier','station','slip_no','pump','attendant','scan_status'],
+  trucks:['truck_no','trailer_no','make_model','driver','status','current_km','next_service_km','license_expiry','roadworthy_expiry','insurance_expiry'],
+  drivers:['name','phone','email','license_expiry','pdp_expiry','passport_expiry','status'],
+  invoices:['date','device_time','client','invoice_no','route','amount','paid','status'],
+  payroll:['date','device_time','employee','role','basic_salary','days_worked','overtime_hours','advance','deductions'],
+  workers:['date','device_time','name','site','role','status','hours','overtime','rate','advance'],
+  maintenance:['date','truck','issue','cost','next_service_km','status'],
+  tyres:['date','truck','position','brand','serial_no','cost','km_fitted','status'],
+  permits:['item','owner','type','expiry_date','cost','status'],
+  payments:['date','device_time','party','method','reference','amount','status','notes'],
+  fines:['date','driver','truck','type','description','amount','status'],
+  border:['date','truck','driver','border_post','country','cost','delay_hours','notes']
+};
+const IMPORT_TABLES={trips:'trips',diesel:'diesel',trucks:'trucks',drivers:'drivers',invoices:'invoices',payroll:'payroll',workers:'workers',maintenance:'maintenance',tyres:'tyres',permits:'permits',payments:'payments',fines:'fines_damages',border:'border_logs'};
+const UNIQUE_KEYS={
+  trips:['trip_no'],
+  diesel:['slip_no','truck'],
+  trucks:['truck_no'],
+  drivers:['name'],
+  invoices:['invoice_no'],
+  payroll:['date','employee'],
+  workers:['date','name','site'],
+  maintenance:['date','truck','issue'],
+  tyres:['serial_no'],
+  permits:['item','owner'],
+  payments:['reference','party'],
+  fines:['date','driver','amount'],
+  border:['date','truck','border_post']
+};
+
 app.post('/api/import/excel/:module',auth,upload.single('file'),async(req,res)=>{
   if(!req.file)return res.status(400).json({error:'No Excel file uploaded'});
   const module=req.params.module;
-  const tables={trips:'trips',diesel:'diesel',trucks:'trucks',drivers:'drivers',invoices:'invoices',payroll:'payroll',workers:'workers',maintenance:'maintenance',tyres:'tyres',permits:'permits'};
-  const cols={
-    trips:['trip_no','date','route','from_place','to_place','client','load_desc','truck','trailer','driver','start_km','end_km','km','rate_km','diesel_cost','tolls','permits_cost','food_money','border_cost','repairs','other_cost','status'],
-    diesel:['date','truck','driver','litres','price_per_litre','amount','km','supplier','station','slip_no','pump','attendant','scan_status'],
-    trucks:['truck_no','trailer_no','make_model','driver','status','current_km','next_service_km','license_expiry','roadworthy_expiry','insurance_expiry'],
-    drivers:['name','phone','email','license_expiry','pdp_expiry','passport_expiry','status'],
-    invoices:['date','client','invoice_no','route','amount','paid','status'],
-    payroll:['date','employee','role','basic_salary','days_worked','overtime_hours','advance','deductions'],
-    workers:['date','name','site','role','status','hours','overtime','rate','advance'],
-    maintenance:['date','truck','issue','cost','next_service_km','status'],
-    tyres:['date','truck','position','brand','serial_no','cost','km_fitted','status'],
-    permits:['item','owner','type','expiry_date','cost','status']
-  };
-  const table=tables[module]; if(!table)return res.status(400).json({error:'Unsupported module'});
+  const table=IMPORT_TABLES[module];
+  const cols=IMPORT_COLS[module];
+  if(!table||!cols)return res.status(400).json({error:'Unsupported module'});
+  let inserted=0,updated=0,skipped=0,errors=[];
   try{
     const wb=XLSX.readFile(req.file.path);
     const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});
-    let inserted=0,skipped=0,errors=[];
-    for(const row of rows){
-      const clean={};
-      for(const [k,v] of Object.entries(row)){
-        clean[String(k).trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'')]=v;
-      }
+    for(const raw of rows){
+      const clean=normalizeExcelRow(raw);
       const obj={};
-      for(const c of cols[module]) obj[c]=clean[c] ?? clean[c.replace('_','')] ?? '';
+      for(const c of cols){
+        obj[c]=clean[c] ?? clean[c.replace('_','')] ?? '';
+      }
       if(module==='trips') obj.km=Number(obj.km||0)||Math.max(0,Number(obj.end_km||0)-Number(obj.start_km||0));
+      if(!obj.device_time && ['trips','diesel','payroll','workers','payments','invoices'].includes(module)) obj.device_time=new Date().toISOString();
+
       const keys=Object.keys(obj).filter(k=>obj[k]!==''&&obj[k]!==undefined&&obj[k]!==null);
       if(!keys.length){skipped++;continue;}
+
+      const unique=(UNIQUE_KEYS[module]||[]).filter(k=>obj[k]);
       try{
-        await pool.query(`insert into ${table}(${keys.join(',')}) values(${keys.map((_,i)=>'$'+(i+1)).join(',')})`, keys.map(k=>obj[k]));
-        inserted++;
-      }catch(e){skipped++; if(errors.length<5)errors.push(e.message);}
+        let existing=null;
+        if(unique.length){
+          const where=unique.map((k,i)=>`${k}=$${i+1}`).join(' and ');
+          const ex=await pool.query(`select id from ${table} where ${where} limit 1`,unique.map(k=>obj[k]));
+          existing=ex.rows[0];
+        }
+        if(existing){
+          const updKeys=keys.filter(k=>!unique.includes(k));
+          if(updKeys.length){
+            await pool.query(`update ${table} set ${updKeys.map((k,i)=>k+'=$'+(i+1)).join(',')} where id=$${updKeys.length+1}`,[...updKeys.map(k=>obj[k]),existing.id]);
+            updated++;
+          } else skipped++;
+        }else{
+          await pool.query(`insert into ${table}(${keys.join(',')}) values(${keys.map((_,i)=>'$'+(i+1)).join(',')})`, keys.map(k=>obj[k]));
+          inserted++;
+        }
+      }catch(e){skipped++; if(errors.length<10)errors.push(e.message);}
     }
-    res.json({module,inserted,skipped,errors});
-  }catch(e){res.status(500).json({error:e.message});}
-});
-
-
-app.post('/api/invoices/:id/payment',auth,async(req,res)=>{
-  const amount=Number(req.body.amount||0);
-  const status=req.body.status||'Paid';
-  const method=req.body.method||'EFT';
-  const reference=req.body.reference||'';
-  const inv=(await pool.query('select * from invoices where id=$1',[req.params.id])).rows[0];
-  if(!inv)return res.status(404).json({error:'Invoice not found'});
-  const newPaid=Math.max(0,Number(inv.paid||0)+amount);
-  const finalStatus=status || (newPaid>=Number(inv.amount||0)?'Paid':'Part Paid');
-  await pool.query('update invoices set paid=$1,status=$2 where id=$3',[newPaid,finalStatus,req.params.id]);
-  await pool.query('insert into payments(party,method,reference,amount,status,notes) values($1,$2,$3,$4,$5,$6)',[inv.client,method,reference,amount,finalStatus,'Invoice '+(inv.invoice_no||inv.id)]);
-  res.json({ok:true,paid:newPaid,status:finalStatus});
-});
-
-
-app.get('/api/people/profile/:type/:name',auth,async(req,res)=>{
-  const name=decodeURIComponent(req.params.name||'');
-  const type=req.params.type;
-  const trips=(await pool.query("select * from trips where lower(driver)=lower($1) order by created_at desc",[name])).rows;
-  const diesel=(await pool.query("select * from diesel where lower(driver)=lower($1) order by created_at desc",[name])).rows;
-  const payroll=(await pool.query("select * from payroll where lower(employee)=lower($1) order by created_at desc",[name])).rows;
-  const workers=(await pool.query("select * from workers where lower(name)=lower($1) order by created_at desc",[name])).rows;
-  const fines=(await pool.query("select * from fines_damages where lower(driver)=lower($1) or lower(responsible_party)=lower($1) order by created_at desc",[name])).rows;
-  const gps=(await pool.query("select * from gps_points where lower(driver)=lower($1) order by created_at desc limit 50",[name])).rows;
-  const uploads=(await pool.query("select * from upload_queue where lower(driver)=lower($1) order by created_at desc",[name])).rows;
-  const km=trips.reduce((a,t)=>a+Number(t.km||0),0);
-  const revenue=trips.reduce((a,t)=>a+(Number(t.km||0)*Number(t.rate_km||0)),0);
-  const dieselCost=diesel.reduce((a,d)=>a+Number(d.amount||0),0);
-  const payrollTotal=payroll.reduce((a,p)=>a+Number(p.basic_salary||0)+Number(p.advance||0)-Number(p.deductions||0),0);
-  const finesTotal=fines.reduce((a,f)=>a+Number(f.amount||0),0);
-  res.json({name,type,summary:{trips:trips.length,km,revenue,dieselCost,payrollTotal,finesTotal,uploads:uploads.length},trips,diesel,payroll,workers,fines,gps,uploads});
-});
-
-
-app.post('/api/whatsapp/inbound',async(req,res)=>{
-  const token=req.query.token||req.headers['x-webhook-token']||'';
-  if(process.env.WHATSAPP_WEBHOOK_TOKEN && token!==process.env.WHATSAPP_WEBHOOK_TOKEN){
-    return res.status(401).json({error:'Bad webhook token'});
+    await pool.query("insert into excel_imports(module,filename,rows_inserted,rows_updated,rows_skipped,status,message) values($1,$2,$3,$4,$5,$6,$7)",[module,req.file.originalname||req.file.filename,inserted,updated,skipped,errors.length?'Imported with errors':'Imported',errors.join(' | ')]);
+    res.json({module,inserted,updated,skipped,errors});
+  }catch(e){
+    await pool.query("insert into excel_imports(module,filename,status,message) values($1,$2,'Failed',$3)",[module,req.file?.originalname||'',e.message]).catch(()=>null);
+    res.status(500).json({error:e.message});
   }
-  const b=req.body||{};
-  const driver=b.driver||b.from_name||b.profileName||b.name||b.From||b.from||'WhatsApp Driver';
-  const truck=b.truck||b.plate||'';
-  const docType=b.doc_type||b.type||'auto';
-  const mediaUrl=b.media_url||b.MediaUrl0||b.image||b.file_url||'';
-  const text=b.text||b.Body||b.message||'';
-  const deviceTime=b.device_time||new Date().toISOString();
-
-  let fileUrl=mediaUrl;
-  if(mediaUrl && mediaUrl.startsWith('http')){
-    try{
-      const resp=await fetch(mediaUrl);
-      if(resp.ok){
-        const arr=Buffer.from(await resp.arrayBuffer());
-        const ext=(resp.headers.get('content-type')||'image/jpeg').includes('pdf')?'.pdf':'.jpg';
-        const fn='wa_'+Date.now()+ext;
-        fs.writeFileSync(path.join(__dirname,'uploads',fn),arr);
-        fileUrl='/uploads/'+fn;
-      }
-    }catch(e){/* keep mediaUrl */}
-  }
-
-  const q=await pool.query(
-    "insert into upload_queue(driver,truck,doc_type,file_url,status,device_time,result_json) values($1,$2,$3,$4,'Queued',$5,$6) returning *",
-    [driver,truck,docType,fileUrl,deviceTime,{text,source:'whatsapp'}]
-  );
-  await logIntegration('whatsapp','inbound','queued','WhatsApp document queued',{driver,truck,docType,fileUrl});
-  res.json({ok:true,queued:q.rows[0]});
 });
 
-app.get('/api/whatsapp/setup',auth,admin,(req,res)=>{
-  res.json({
-    webhook_url:'/api/whatsapp/inbound?token=YOUR_TOKEN',
-    railway_variable:'WHATSAPP_WEBHOOK_TOKEN',
-    use:'Connect WhatsApp Business, Twilio, Make.com or Zapier to POST media_url, driver, truck, doc_type and text to this endpoint.'
-  });
+
+function kmDistance(a,b,c,d){if([a,b,c,d].some(x=>x===null||x===undefined||x===''))return 0;const R=6371,toRad=x=>Number(x)*Math.PI/180;const dLat=toRad(c-a),dLon=toRad(d-b);const q=Math.sin(dLat/2)**2+Math.cos(toRad(a))*Math.cos(toRad(c))*Math.sin(dLon/2)**2;return R*2*Math.atan2(Math.sqrt(q),Math.sqrt(1-q));}
+async function addRec(module,title,message,severity='Info'){try{await pool.query("insert into ai_recommendations(module,title,message,severity) values($1,$2,$3,$4)",[module,title,message,severity]);}catch(e){}}
+async function aiJson(prompt,data){
+ if(!process.env.OPENAI_API_KEY)return {error:'OPENAI_API_KEY not configured',manual_required:true};
+ try{
+  const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+process.env.OPENAI_API_KEY},body:JSON.stringify({model:process.env.AI_MODEL||'gpt-4o-mini',temperature:0,response_format:{type:'json_object'},messages:[{role:'system',content:'Return only JSON for a transport ERP.'},{role:'user',content:prompt+' DATA:'+JSON.stringify(data).slice(0,12000)}]})});
+  const j=await r.json(); if(!r.ok||j.error)return {error:j.error?.message||'AI error'};
+  return JSON.parse(j.choices?.[0]?.message?.content||'{}');
+ }catch(e){return {error:e.message}}
+}
+
+app.post('/api/trip-session/start',auth,async(req,res)=>{
+ const {truck,route,lat,lng}=req.body||{};
+ const driver=req.body.driver||req.user.name||req.user.email;
+ const r=await pool.query("insert into trip_sessions(driver,truck,route,start_lat,start_lng,status) values($1,$2,$3,$4,$5,'Started') returning *",[driver,truck||'',route||'',lat||null,lng||null]);
+ res.json({session:r.rows[0]});
+});
+app.post('/api/trip-session/end',auth,async(req,res)=>{
+ const {id,lat,lng}=req.body||{};
+ let sess=id?(await pool.query("select * from trip_sessions where id=$1",[id])).rows[0]:(await pool.query("select * from trip_sessions where driver=$1 and status='Started' order by created_at desc limit 1",[req.user.name||req.user.email])).rows[0];
+ if(!sess)return res.status(404).json({error:'No active trip'});
+ const r=await pool.query("update trip_sessions set end_time=now(),end_lat=$1,end_lng=$2,status='Ended' where id=$3 returning *",[lat||null,lng||null,sess.id]);
+ res.json({session:r.rows[0]});
+});
+app.post('/api/ai/auto-trip-generator',auth,async(req,res)=>{
+ const sessions=(await pool.query("select * from trip_sessions where status in ('Ended','Started') and generated_trip_id is null order by created_at desc limit 50")).rows;
+ const docs=(await pool.query("select * from ai_documents order by created_at desc limit 100")).rows;
+ const diesel=(await pool.query("select * from diesel order by created_at desc limit 100")).rows;
+ let created=[];
+ for(const x of sessions){
+  const ds=diesel.filter(d=>!x.truck||!d.truck||String(d.truck).toLowerCase()===String(x.truck).toLowerCase());
+  const dc=ds.reduce((a,d)=>a+Number(d.amount||0),0);
+  const km=Math.round(kmDistance(x.start_lat,x.start_lng,x.end_lat,x.end_lng));
+  const pod=docs.find(d=>(d.doc_type==='pod'||d.doc_type==='invoice')&&(!x.truck||!d.truck||String(d.truck).toLowerCase()===String(x.truck).toLowerCase()));
+  const route=x.route||pod?.description||'AI Generated Trip';
+  const r=await pool.query("insert into trips(date,device_time,route,truck,driver,km,diesel_cost,status) values(current_date,$1,$2,$3,$4,$5,$6,'AI Generated') returning *",[new Date().toISOString(),route,x.truck||'',x.driver||req.user.name||req.user.email,km,dc]);
+  await pool.query("update trip_sessions set generated_trip_id=$1,status='Generated' where id=$2",[r.rows[0].id,x.id]);
+  created.push(r.rows[0]);
+ }
+ await addRec('trips','Auto Trip Generator',`Created ${created.length} trips`,'Info');
+ res.json({created});
+});
+app.post('/api/ai/fleet-ai',auth,async(req,res)=>{
+ await pool.query("delete from ai_recommendations where module='fleet'");
+ const trucks=(await pool.query("select * from trucks")).rows, maint=(await pool.query("select * from maintenance")).rows, tyres=(await pool.query("select * from tyres")).rows;
+ let n=0;
+ for(const t of trucks){const name=t.truck_no||t.make_model||'Truck';if(Number(t.next_service_km||0)>0&&Number(t.current_km||0)>=Number(t.next_service_km||0)-1500){await addRec('fleet','Service Due',`${name} close to service. Current ${t.current_km}, next ${t.next_service_km}`,'Warning');n++;}}
+ for(const m of maint){if(!['closed','completed'].includes(String(m.status||'').toLowerCase())){await addRec('fleet','Open Workshop Job',`${m.truck||''}: ${m.issue||''}`,'Info');n++;}}
+ for(const t of tyres){if(['worn','replace','damaged'].includes(String(t.status||'').toLowerCase())){await addRec('fleet','Tyre Risk',`${t.truck||''} ${t.position||''} ${t.status}`,'Warning');n++;}}
+ res.json({ok:true,recommendations:n});
+});
+app.post('/api/ai/finance-ai',auth,async(req,res)=>{
+ await pool.query("delete from ai_recommendations where module='finance'");
+ const inv=(await pool.query("select * from invoices")).rows, trips=(await pool.query("select * from trips")).rows, pay=(await pool.query("select * from payments")).rows;
+ const rec=inv.reduce((a,i)=>a+Math.max(0,Number(i.amount||0)-Number(i.paid||0)),0);
+ const profit=trips.reduce((a,t)=>a+tripCalc(t).profit,0);
+ const paid=pay.reduce((a,p)=>a+Number(p.amount||0),0);
+ if(rec>0)await addRec('finance','Receivables Warning',`Outstanding balances total N$ ${rec.toFixed(2)}`,'Warning');
+ if(profit<0)await addRec('finance','Profit Loss Warning',`Trips show negative profit N$ ${profit.toFixed(2)}`,'Urgent');
+ await addRec('finance','Payments Movement',`Recorded payments total N$ ${paid.toFixed(2)}`,'Info');
+ res.json({ok:true,receivables:rec,profit,payments:paid});
+});
+app.post('/api/ai/driver-ai',auth,async(req,res)=>{
+ await pool.query("delete from ai_recommendations where module='driver'"); await pool.query("delete from driver_scores");
+ const rows=(await pool.query("select distinct driver from trips where driver is not null and driver<>''")).rows;
+ for(const d of rows){const trips=(await pool.query("select * from trips where driver=$1",[d.driver])).rows;const diesel=trips.reduce((a,t)=>a+Number(t.diesel_cost||0),0);const km=trips.reduce((a,t)=>a+Number(t.km||0),0);const cpk=km?diesel/km:0;let score=100;if(cpk>8)score-=15;if(cpk>12)score-=25;await pool.query("insert into driver_scores(driver,score,fuel_efficiency) values($1,$2,$3)",[d.driver,score,cpk]);if(score<75)await addRec('driver','Driver Fuel Alert',`${d.driver} diesel cost N$ ${cpk.toFixed(2)}/km`,'Warning');}
+ res.json({ok:true});
+});
+app.post('/api/ai/whatsapp-ai',auth,async(req,res)=>{
+ const queued=(await pool.query("select * from upload_queue where status='Queued' order by created_at asc limit 20")).rows;let processed=0;
+ for(const q of queued){const fp=q.file_url?.startsWith('/uploads/')?path.join(__dirname,q.file_url.replace('/uploads/','uploads/')):'';if(fp&&fs.existsSync(fp)){const scan=await scanDocumentAI(fp,q.doc_type||'auto');await pool.query("update upload_queue set status=$1,scan_status=$2,result_json=$3 where id=$4",[scan.manual_required?'Manual Required':'Scanned',scan.manual_required?'Manual Required':'Scanned',scan,q.id]);processed++;}}
+ await addRec('whatsapp','WhatsApp AI',`Processed ${processed} queued uploads`,'Info');
+ res.json({processed});
+});
+app.post('/api/ai/excel-ai-sync',auth,async(req,res)=>{
+ await pool.query("delete from ai_recommendations where module='excel'");
+ const im=(await pool.query("select * from excel_imports order by created_at desc limit 20")).rows;
+ for(const x of im){if(Number(x.rows_skipped||0)>0)await addRec('excel','Excel Sync Skips',`${x.module} skipped ${x.rows_skipped}. ${x.message||''}`,'Warning');else await addRec('excel','Excel Sync OK',`${x.module} inserted ${x.rows_inserted}, updated ${x.rows_updated}`,'Info');}
+ res.json({ok:true,imports:im.length});
+});
+app.post('/api/ai/voice-ai',auth,async(req,res)=>{
+ const {transcript,driver,truck}=req.body||{}; if(!transcript)return res.status(400).json({error:'Transcript required'});
+ const p=await aiJson("Parse voice note into JSON: route, from_place, to_place, truck, driver, load_desc, km, rate_km, diesel_cost, food_money, status, manual_fields, action.",{transcript,driver,truck});
+ await pool.query("insert into voice_notes(driver,truck,transcript,parsed_json,status) values($1,$2,$3,$4,$5)",[driver||req.user.name||req.user.email,truck||'',transcript,p,p.error?'Manual Required':'Parsed']);
+ if(p.route){await pool.query("insert into trips(date,device_time,route,from_place,to_place,truck,driver,load_desc,km,rate_km,diesel_cost,food_money,status) values(current_date,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",[new Date().toISOString(),p.route||'',p.from_place||'',p.to_place||'',p.truck||truck||'',p.driver||driver||req.user.name||req.user.email,p.load_desc||'',p.km||0,p.rate_km||0,p.diesel_cost||0,p.food_money||0,p.status||'Voice AI']);}
+ res.json({parsed:p});
 });
 
 app.get('/api/export/:table/:format',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).send('Unknown');let rows=(await pool.query(`select * from ${t} order by created_at desc`)).rows;let f=req.params.format;if(f==='json')return res.json(rows);if(f==='xlsx'){let wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),req.params.table);res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.xlsx`);return res.send(XLSX.write(wb,{type:'buffer',bookType:'xlsx'}))}if(f==='csv'){res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.csv`);let h=Object.keys(rows[0]||{});return res.send([h.join(','),...rows.map(r=>h.map(k=>JSON.stringify(r[k]??'')).join(','))].join('\\n'))}let doc=new PDFDocument({margin:30});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.pdf`);doc.pipe(res);doc.fontSize(18).text('Angermund Transport - '+req.params.table.toUpperCase());rows.slice(0,200).forEach((r,i)=>doc.fontSize(8).text((i+1)+'. '+JSON.stringify(r)));doc.end()});
