@@ -1410,3 +1410,204 @@ function renderImportsV23(){
 }
 const oldShowV23=show;
 show=function(id,btn){oldShowV23(id,btn); if(id==='imports')setTimeout(renderImportsV23,100);}
+
+
+// V24: Filters for every important tab
+const FILTER_CONFIGS = {
+  trips: [
+    ['driver','Driver'], ['truck','Truck'], ['route','Route'], ['client','Client'], ['status','Status'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  diesel: [
+    ['driver','Driver'], ['truck','Truck'], ['supplier','Supplier'], ['station','Station'], ['scan_status','Status'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  invoices: [
+    ['client','Client'], ['status','Status'], ['route','Route'], ['invoice_no','Invoice No'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  payments: [
+    ['party','Party'], ['method','Method'], ['status','Status'], ['reference','Reference'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  trucks: [
+    ['truck_no','Truck'], ['driver','Driver'], ['status','Status'], ['make_model','Make/Model']
+  ],
+  drivers: [
+    ['name','Driver'], ['status','Status'], ['license_expiry','License From','date'], ['license_expiry_to','License To','date']
+  ],
+  payroll: [
+    ['employee','Employee'], ['role','Role'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  workers: [
+    ['name','Worker'], ['site','Site'], ['role','Role'], ['status','Status'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  maintenance: [
+    ['truck','Truck'], ['status','Status'], ['issue','Issue'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  tyres: [
+    ['truck','Truck'], ['position','Position'], ['brand','Brand'], ['status','Status'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  permits: [
+    ['owner','Owner'], ['type','Type'], ['status','Status'], ['expiry_date','Expiry From','date'], ['expiry_date_to','Expiry To','date']
+  ],
+  fines: [
+    ['driver','Driver'], ['truck','Truck'], ['type','Type'], ['status','Status'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  border: [
+    ['driver','Driver'], ['truck','Truck'], ['border_post','Border Post'], ['country','Country'], ['date','From Date','date'], ['date_to','To Date','date']
+  ],
+  gps: [
+    ['driver','Driver'], ['truck','Truck']
+  ],
+  peoplehub: [
+    ['person','Driver/Worker']
+  ]
+};
+
+const filterState = {};
+
+function uniqueValuesForField(page, field){
+  let rows = cache?.[page] || [];
+  if(page === 'fines') rows = cache?.fines || cache?.fines_damages || rows;
+  if(page === 'border') rows = cache?.border || cache?.border_logs || rows;
+  if(field === 'person'){
+    const names = new Set();
+    (cache.drivers||[]).forEach(x=>x.name&&names.add(x.name));
+    (cache.workers||[]).forEach(x=>x.name&&names.add(x.name));
+    (cache.trips||[]).forEach(x=>x.driver&&names.add(x.driver));
+    (cache.diesel||[]).forEach(x=>x.driver&&names.add(x.driver));
+    return [...names].sort();
+  }
+  const vals = [...new Set((rows||[]).map(r => r?.[field]).filter(v => v !== null && v !== undefined && String(v).trim() !== ''))];
+  return vals.map(String).sort();
+}
+
+function filterInputHtml(page, f){
+  const [key,label,type] = f;
+  const val = filterState[page]?.[key] || '';
+  if(type === 'date'){
+    return `<label>${label}<input type="date" value="${val}" onchange="setFilter('${page}','${key}',this.value)"></label>`;
+  }
+  const values = uniqueValuesForField(page,key);
+  if(values.length && values.length <= 80){
+    return `<label>${label}<select onchange="setFilter('${page}','${key}',this.value)">
+      <option value="">All</option>
+      ${values.map(v=>`<option value="${String(v).replace(/"/g,'&quot;')}" ${String(v)===String(val)?'selected':''}>${v}</option>`).join('')}
+    </select></label>`;
+  }
+  return `<label>${label}<input placeholder="Search ${label}" value="${String(val).replace(/"/g,'&quot;')}" oninput="setFilter('${page}','${key}',this.value)"></label>`;
+}
+
+function renderFilterPanel(page){
+  const cfg = FILTER_CONFIGS[page];
+  if(!cfg) return '';
+  const count = Object.values(filterState[page]||{}).filter(Boolean).length;
+  return `<div class="filterPanel" id="filter_${page}">
+    <b>Filters</b>${count?`<span class="filterBadge">${count} active</span>`:''}
+    <div class="filterGrid">${cfg.map(f=>filterInputHtml(page,f)).join('')}</div>
+    <div class="filterActions">
+      <button class="btn gray" onclick="clearFilters('${page}')">Clear Filters</button>
+      <button class="btn" onclick="refreshFilterPanel('${page}')">Refresh Lists</button>
+    </div>
+  </div>`;
+}
+
+function ensureFilterPanel(page){
+  const sec=document.getElementById(page);
+  if(!sec || !FILTER_CONFIGS[page]) return;
+  let existing=sec.querySelector('#filter_'+page);
+  if(existing) {
+    existing.outerHTML = renderFilterPanel(page);
+    return;
+  }
+  const holder=document.createElement('div');
+  holder.innerHTML=renderFilterPanel(page);
+  const firstCard = sec.querySelector('.moduleTools') || sec.firstElementChild;
+  if(firstCard && firstCard.nextSibling) sec.insertBefore(holder.firstElementChild, firstCard.nextSibling);
+  else sec.prepend(holder.firstElementChild);
+}
+
+function setFilter(page,key,value){
+  filterState[page] = filterState[page] || {};
+  filterState[page][key] = value;
+  applyFilters(page);
+}
+
+function clearFilters(page){
+  filterState[page] = {};
+  applyFilters(page);
+  ensureFilterPanel(page);
+}
+
+function refreshFilterPanel(page){
+  ensureFilterPanel(page);
+  applyFilters(page);
+}
+
+function rowMatchesFilters(row, page){
+  const f = filterState[page] || {};
+  for(const [key,val] of Object.entries(f)){
+    if(!val) continue;
+    if(key.endsWith('_to')){
+      const base = key.replace(/_to$/,'');
+      if(row[base] && new Date(row[base]) > new Date(val)) return false;
+      continue;
+    }
+    const isDateFrom = FILTER_CONFIGS[page]?.find(x=>x[0]===key)?.[2] === 'date';
+    if(isDateFrom){
+      if(row[key] && new Date(row[key]) < new Date(val)) return false;
+      continue;
+    }
+    if(key === 'person'){
+      const hay = [row.name,row.driver,row.employee,row.responsible_party].filter(Boolean).join(' ').toLowerCase();
+      if(!hay.includes(String(val).toLowerCase())) return false;
+      continue;
+    }
+    const cell = String(row[key] ?? '').toLowerCase();
+    if(!cell.includes(String(val).toLowerCase())) return false;
+  }
+  return true;
+}
+
+function applyFilters(page){
+  const sec=document.getElementById(page);
+  if(!sec) return;
+  // Hide table rows visually. Keeps existing render system intact.
+  sec.querySelectorAll('table').forEach(tbl=>{
+    const headers=[...tbl.querySelectorAll('tr:first-child th')].map(th=>th.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,''));
+    [...tbl.querySelectorAll('tr')].slice(1).forEach(tr=>{
+      let text=tr.innerText.toLowerCase();
+      let ok=true;
+      const active=filterState[page]||{};
+      for(const [k,v] of Object.entries(active)){
+        if(!v) continue;
+        if(k.endsWith('_to') || FILTER_CONFIGS[page]?.find(x=>x[0]===k)?.[2]==='date') continue;
+        ok = ok && text.includes(String(v).toLowerCase());
+      }
+      tr.style.display = ok ? '' : 'none';
+    });
+  });
+  // Re-render People Hub list by person filter.
+  if(page === 'peoplehub' && typeof renderPeopleHub === 'function'){
+    const q=filterState.peoplehub?.person||'';
+    setTimeout(()=>filterPeople(q),50);
+  }
+}
+
+function attachAllFilters(){
+  Object.keys(FILTER_CONFIGS).forEach(page=>{
+    const sec=document.getElementById(page);
+    if(sec) ensureFilterPanel(page);
+  });
+}
+
+const oldShowV24 = show;
+show = function(id,btn){
+  oldShowV24(id,btn);
+  setTimeout(()=>{ensureFilterPanel(id); applyFilters(id);},160);
+};
+
+const oldLoadAllV24 = loadAll;
+loadAll = async function(){
+  await oldLoadAllV24();
+  setTimeout(()=>{attachAllFilters(); const active=document.querySelector('.page.active')?.id; if(active)applyFilters(active);},300);
+};
+
+setTimeout(attachAllFilters,1200);
