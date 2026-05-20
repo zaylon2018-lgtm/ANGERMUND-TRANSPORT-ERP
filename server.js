@@ -1017,6 +1017,61 @@ app.post('/api/ai/voice-ai',auth,async(req,res)=>{
  res.json({parsed:p});
 });
 
+
+// V23: bulk clear and safer transport Excel import
+app.delete('/api/admin/clear/:table',auth,admin,async(req,res)=>{
+  const allowed={trips:'trips',diesel:'diesel',uploads:'upload_queue',ai_docs:'ai_documents',invoices:'invoices',payments:'payments',drivers:'drivers',trucks:'trucks'};
+  const t=allowed[req.params.table]; if(!t)return res.status(400).json({error:'Not allowed'});
+  await pool.query(`delete from ${t}`);
+  res.json({ok:true,cleared:t});
+});
+app.post('/api/admin/clear-test-trips',auth,admin,async(req,res)=>{
+  const r=await pool.query("delete from trips where coalesce(route,'')='' or coalesce(driver,'')='' or (coalesce(km,0)=0 and coalesce(rate_km,0)=0 and coalesce(diesel_cost,0)=0) returning id");
+  res.json({ok:true,deleted:r.rowCount});
+});
+app.post('/api/import/transport-excel',auth,upload.single('file'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'No Excel file uploaded'});
+  let inserted=0, driversAdded=0, trucksAdded=0, skipped=0;
+  const wb=XLSX.readFile(req.file.path,{cellDates:true});
+  function cv(v){ if(v==null)return ''; if(String(v).includes('#DIV'))return ''; return v; }
+  async function ensureDriver(n){n=String(n||'').trim(); if(!n)return; const e=await pool.query("select id from drivers where lower(name)=lower($1)",[n]); if(!e.rowCount){await pool.query("insert into drivers(name,status) values($1,'Active')",[n]); driversAdded++;}}
+  async function ensureTruck(n){n=String(n||'').trim(); if(!n)return; const e=await pool.query("select id from trucks where lower(truck_no)=lower($1)",[n]); if(!e.rowCount){await pool.query("insert into trucks(truck_no,status) values($1,'Active')",[n]); trucksAdded++;}}
+  for(const sh of wb.SheetNames){
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[sh],{header:1,defval:''});
+    for(let r=0;r<rows.length;r++){
+      const line=(rows[r]||[]).map(x=>String(x||'').toLowerCase()).join('|');
+      if(!line.includes('name of driver')) continue;
+      let driver='', truck='', date='', from='', to='', odoStart=0, odoEnd=0, litres=0, dieselAmount=0, income=0, food=0;
+      for(let rr=r; rr<Math.min(r+45,rows.length); rr++){
+        const row=(rows[rr]||[]).map(cv); const txt=row.map(x=>String(x||'').toLowerCase()).join('|');
+        if(txt.includes('name of driver')) driver = cv(rows[rr+1]?.[0]) || cv(rows[rr+1]?.[1]) || driver;
+        if(txt.includes('registration')||txt.includes('truck')) truck = cv(rows[rr+1]?.[6]) || cv(rows[rr+1]?.[7]) || truck;
+        if(txt.includes('date departure')||txt.includes('load date')) date = row.find(v=>String(v).match(/\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}/)) || date;
+        if(txt.includes('odo start')) odoStart = Number(row.find(v=>Number(v)>0) || odoStart);
+        if(txt.includes('odo end')) odoEnd = Number(row.slice().reverse().find(v=>Number(v)>0) || odoEnd);
+        if(txt.includes('load from')) from = cv((rows[rr+1]||[]).find(v=>String(v).trim())) || from;
+        if(txt.includes('load to')||txt.includes('destination')) to = cv((rows[rr+1]||[]).find(v=>String(v).trim())) || to;
+        if(txt.includes('diesel')||txt.includes('fuel slips')){
+          for(let x=rr+1;x<Math.min(rr+8,rows.length);x++){
+            const nums=(rows[x]||[]).filter(v=>!isNaN(Number(v))&&String(v)!=='').map(Number);
+            if(nums.length>=2){litres+=nums[0]||0; dieselAmount+=nums[1]||0;}
+          }
+        }
+        if(txt.includes('income')){ const nums=row.filter(v=>!isNaN(Number(v))&&String(v)!=='').map(Number); if(nums.length) income=Math.max(income,...nums); }
+        if(txt.includes('drivers trip money')||txt.includes('food')){ const nums=row.filter(v=>!isNaN(Number(v))&&String(v)!=='').map(Number); if(nums.length) food=Math.max(food,...nums); }
+      }
+      const km=Math.max(0,Number(odoEnd)-Number(odoStart)); const route=[from,to].filter(Boolean).join(' - ');
+      if(!(driver||truck||route||income||dieselAmount)){skipped++; continue;}
+      await ensureDriver(driver); await ensureTruck(truck);
+      const tripNo=`EXCEL-${sh}-${r}-${driver}-${truck}`.slice(0,120); const rate=km?income/km:0;
+      await pool.query("insert into trips(trip_no,date,device_time,route,from_place,to_place,driver,truck,start_km,end_km,km,rate_km,diesel_cost,food_money,status) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'Imported Excel Report')",[tripNo,date||null,new Date().toISOString(),route,from,to,driver,truck,odoStart,odoEnd,km,rate,dieselAmount,food]);
+      inserted++;
+      if(litres||dieselAmount) await pool.query("insert into diesel(date,device_time,truck,driver,litres,amount,scan_status) values($1,$2,$3,$4,$5,$6,'Excel Import')",[date||null,new Date().toISOString(),truck,driver,litres,dieselAmount]);
+    }
+  }
+  res.json({inserted,driversAdded,trucksAdded,skipped});
+});
+
 app.get('/api/export/:table/:format',auth,async(req,res)=>{let t=tableMap[req.params.table];if(!t)return res.status(404).send('Unknown');let rows=(await pool.query(`select * from ${t} order by created_at desc`)).rows;let f=req.params.format;if(f==='json')return res.json(rows);if(f==='xlsx'){let wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),req.params.table);res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.xlsx`);return res.send(XLSX.write(wb,{type:'buffer',bookType:'xlsx'}))}if(f==='csv'){res.setHeader('Content-Type','text/csv');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.csv`);let h=Object.keys(rows[0]||{});return res.send([h.join(','),...rows.map(r=>h.map(k=>JSON.stringify(r[k]??'')).join(','))].join('\\n'))}let doc=new PDFDocument({margin:30});res.setHeader('Content-Type','application/pdf');res.setHeader('Content-Disposition',`attachment; filename=${req.params.table}.pdf`);doc.pipe(res);doc.fontSize(18).text('Angermund Transport - '+req.params.table.toUpperCase());rows.slice(0,200).forEach((r,i)=>doc.fontSize(8).text((i+1)+'. '+JSON.stringify(r)));doc.end()});
 app.get('/api/invoice/:id/pdf',auth,async(req,res)=>{let r=await pool.query('select * from invoices where id=$1',[req.params.id]);if(!r.rowCount)return res.status(404).send('Not found');let i=r.rows[0],doc=new PDFDocument({margin:50});res.setHeader('Content-Type','application/pdf');doc.pipe(res);doc.fontSize(22).text('ANGERMUND TRANSPORT',{align:'center'});doc.moveDown().fontSize(15).text('Invoice: '+(i.invoice_no||i.id));doc.text('Client: '+(i.client||''));doc.text('Route: '+(i.route||''));doc.text('Amount: N$ '+Number(i.amount||0).toFixed(2));doc.text('Paid: N$ '+Number(i.paid||0).toFixed(2));doc.text('Balance: N$ '+(Number(i.amount||0)-Number(i.paid||0)).toFixed(2));doc.end()});
 app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));

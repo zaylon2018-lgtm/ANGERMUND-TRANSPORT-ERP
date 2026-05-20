@@ -1368,3 +1368,45 @@ function attachV22SmartButtons(){
 const oldShowV22=show;show=function(id,btn){oldShowV22(id,btn);setTimeout(()=>{if(id==='smartai')renderSmartAISuite();attachV22SmartButtons()},120)}
 const oldLoadAllV22=loadAll;loadAll=async function(){await oldLoadAllV22();setTimeout(attachV22SmartButtons,200)}
 setTimeout(attachV22SmartButtons,1000);
+
+
+// V23 bulk clear + safer Excel import
+async function clearModuleData(module,label){
+  if(!confirm('CLEAR ALL '+label+'?'))return;
+  if(!confirm('This cannot be undone. Continue?'))return;
+  const r=await api('/admin/clear/'+module,{method:'DELETE'});
+  alert('Cleared '+label); await loadAll();
+}
+async function clearBadTrips(){
+  const r=await api('/admin/clear-test-trips',{method:'POST',body:{}});
+  alert('Deleted bad trips: '+r.deleted); await loadAll();
+}
+async function importTransportExcel(){
+  const f=document.getElementById('transportExcelFile')?.files?.[0];
+  const out=document.getElementById('transportExcelOut');
+  if(!f)return alert('Choose the real Excel file first');
+  const fd=new FormData(); fd.append('file',f);
+  out.innerText='Reading transport Excel safely...';
+  const r=await fetch('/api/import/transport-excel',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
+  const j=await r.json(); out.innerText=JSON.stringify(j,null,2);
+  await loadAll();
+  alert(`Done. Trips: ${j.inserted||0}, drivers added: ${j.driversAdded||0}, trucks added: ${j.trucksAdded||0}`);
+}
+function renderImportsV23(){
+  const sec=document.getElementById('imports'); if(!sec)return;
+  sec.innerHTML=`<div class="head"><h1>Excel Sync Centre</h1></div>
+  <div class="card"><h2>Safe Transport Excel Import</h2>
+  <p>Upload the real .xlsx file. Screenshots cannot safely read all cells and formulas.</p>
+  <input id="transportExcelFile" type="file" accept=".xlsx,.xls,.csv"><br><br>
+  <button class="btn green" onclick="importTransportExcel()">Import Driver Trip Report Excel</button>
+  <pre id="transportExcelOut"></pre></div>
+  <div class="card" style="border:1px solid #ff4e4e"><h2>Clear Wrong Import</h2>
+  <button class="btn orange" onclick="clearBadTrips()">Delete Blank/Test Trips Only</button>
+  <button class="btn red" onclick="clearModuleData('trips','Trips')">Clear ALL Trips</button>
+  <button class="btn red" onclick="clearModuleData('diesel','Diesel')">Clear ALL Diesel</button>
+  <button class="btn red" onclick="clearModuleData('uploads','Upload Queue')">Clear Upload Queue</button>
+  </div>
+  <div class="card"><h2>Best Excel layout</h2><p>Columns/labels should include Driver, Truck/Registration, Date, Load From, Load To, Odo Start, Odo End, Litres, Diesel Amount, Trip Income.</p></div>`;
+}
+const oldShowV23=show;
+show=function(id,btn){oldShowV23(id,btn); if(id==='imports')setTimeout(renderImportsV23,100);}
